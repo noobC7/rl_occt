@@ -12,6 +12,7 @@ from tensordict import TensorDictBase
 from torchrl.envs.libs.vmas import VmasEnv
 from torchrl.record.loggers import generate_exp_name, get_logger, Logger
 from torchrl.record.loggers.wandb import WandbLogger
+from torchrl.record.loggers.swanlab import SwanLabLogger
 
 
 def init_logging(cfg, model_name: str):
@@ -23,6 +24,12 @@ def init_logging(cfg, model_name: str):
             "group": cfg.logger.group_name or model_name,
             "project": cfg.logger.project_name
             or f"torchrl_example_{cfg.env.scenario_name}",
+        },
+        swanlab_kwargs={
+            "config": cfg,
+            "group": cfg.logger.group_name or model_name,
+            "project": cfg.logger.project_name
+            or f"swanlab_{cfg.env.scenario_name}",
         },
     )
     logger.log_hparams(cfg)
@@ -145,6 +152,9 @@ def log_evaluation(
             },
             commit=False,
         )
+    if isinstance(logger, SwanLabLogger):
+        logger.experiment.log(metrics_to_log)
+        logger.log_video("eval/video", vid, step=step)
     else:
         for key, value in metrics_to_log.items():
             logger.log_scalar(key.replace("/", "_"), value, step=step)
