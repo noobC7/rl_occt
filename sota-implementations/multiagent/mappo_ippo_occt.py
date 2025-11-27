@@ -5,7 +5,7 @@
 from __future__ import annotations
 
 import time
-
+import os
 import hydra
 import torch
 from tensordict.nn import TensorDictModule
@@ -29,6 +29,42 @@ from utils.utils import DoneTransform
 def rendering_callback(env, td):
     env.frames.append(env.render(mode="rgb_array", agent_index_focus=None))
 
+def save_checkpoint(logger, policy, value_module, optim, iteration, total_frames):
+    """保存训练检查点"""
+    checkpoint_dir = os.path.join(logger.save_dir, "checkpoints")
+    os.makedirs(checkpoint_dir, exist_ok=True)
+    checkpoint_path = os.path.join(
+        checkpoint_dir, 
+        f"checkpoint_iter_{iteration}_frames_{total_frames}.pt"
+    )
+    
+    checkpoint = {
+        'iteration': iteration,
+        'total_frames': total_frames,
+        'policy_state_dict': policy.state_dict(),
+        'value_module_state_dict': value_module.state_dict(),
+        'optimizer_state_dict': optim.state_dict()
+    }
+    
+    torch.save(checkpoint, checkpoint_path)
+    torchrl_logger.info(f"Checkpoint saved at {checkpoint_path}")
+    
+
+def load_checkpoint(checkpoint_path, policy, value_module, optim):
+    """加载训练检查点并恢复训练状态"""
+    checkpoint = torch.load(checkpoint_path)
+    
+    policy.load_state_dict(checkpoint['policy_state_dict'])
+    value_module.load_state_dict(checkpoint['value_module_state_dict'])
+    optim.load_state_dict(checkpoint['optimizer_state_dict'])
+    
+    iteration = checkpoint['iteration']
+    total_frames = checkpoint['total_frames']
+    
+    torchrl_logger.info(f"Checkpoint loaded from {checkpoint_path}")
+    torchrl_logger.info(f"Resuming training from iteration {iteration}, frame {total_frames}")
+    
+    return iteration, total_frames
 
 @hydra.main(version_base="1.1", config_path="", config_name="mappo_ippo_occt")
 def train(cfg: DictConfig):  # noqa: F821
@@ -38,7 +74,10 @@ def train(cfg: DictConfig):  # noqa: F821
 
     # Seeding
     torch.manual_seed(cfg.seed)
-
+    # 检查是否需要从检查点恢复
+    resume_from_checkpoint = getattr(cfg.train, 'resume_from_checkpoint', None)
+    start_iteration = 0
+    start_frames = 0
     # Sampling
     cfg.env.vmas_envs = cfg.collector.frames_per_batch // cfg.env.max_steps
     cfg.collector.total_frames = cfg.collector.frames_per_batch * cfg.collector.n_iters
@@ -117,6 +156,11 @@ def train(cfg: DictConfig):  # noqa: F821
         num_cells=256,
         activation_class=nn.Tanh,
     )
+    # 加载检查点（如果指定）
+    if resume_from_checkpoint and os.path.exists(resume_from_checkpoint):
+        start_iteration, start_frames = load_checkpoint(
+            resume_from_checkpoint, policy, value_module, optim
+        )
     value_module = ValueOperator(
         module=module,
         in_keys=[("agents", "observation")],
@@ -167,9 +211,9 @@ def train(cfg: DictConfig):  # noqa: F821
         logger = init_logging(cfg, model_name)
 
     total_time = 0
-    total_frames = 0
+    total_frames = start_frames
     sampling_start = time.time()
-    for i, tensordict_data in enumerate(collector):
+    for i, tensordict_data in enumerate(collector, start=start_iteration):
         torchrl_logger.info(f"\nIteration {i}")
 
         sampling_time = time.time() - sampling_start
@@ -252,6 +296,7 @@ def train(cfg: DictConfig):  # noqa: F821
                 evaluation_time = time.time() - evaluation_start
 
                 log_evaluation(logger, rollouts, env_test, evaluation_time, step=i)
+                save_checkpoint(logger, policy, value_module, optim, i, total_frames)
 
         if cfg.logger.backend == "wandb":
             logger.experiment.log({}, commit=True)
