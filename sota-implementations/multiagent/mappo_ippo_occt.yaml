@@ -6,7 +6,9 @@ env:
   scenario:
     n_agents: 3
     task_class: 0
-    platoon_vel: 7.0
+    platoon_vel_mean: 7.0
+    platoon_vel_var: 4.0
+    is_observe_distance_to_boundaries: False # False means observe future left and right boundaries
   device: ??? # These values will be populated dynamically
   vmas_envs: ???
 
