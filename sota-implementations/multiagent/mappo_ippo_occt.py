@@ -48,7 +48,34 @@ def save_checkpoint(logger, policy, value_module, optim, iteration, total_frames
     
     torch.save(checkpoint, checkpoint_path)
     torchrl_logger.info(f"Checkpoint saved at {checkpoint_path}")
+def save_rollout(logger, rollouts, iteration, total_frames):
+    """
+    保存rollout对象到rollout文件夹中
     
+    参数:
+        logger: 日志记录器对象，需包含save_dir属性
+        rollouts: rollout输出的TensorDict对象
+        iteration: 当前迭代次数
+        total_frames: 总帧数
+    
+    返回:
+        rollout_path: 保存的rollout文件路径
+    """
+    # 创建rollout保存目录
+    rollout_dir = os.path.join(logger.save_dir, "rollouts")
+    os.makedirs(rollout_dir, exist_ok=True)
+    
+    # 构建保存路径
+    rollout_path = os.path.join(
+        rollout_dir, 
+        f"rollout_iter_{iteration}_frames_{total_frames}.pt"
+    )
+    
+    # 保存rollout对象
+    torch.save(rollouts, rollout_path)
+    print(f"Rollout saved at {rollout_path}")
+    
+    return rollout_path
 
 def load_checkpoint(checkpoint_path, policy, value_module, optim):
     """加载训练检查点并恢复训练状态"""
@@ -156,11 +183,6 @@ def train(cfg: DictConfig):  # noqa: F821
         num_cells=256,
         activation_class=nn.Tanh,
     )
-    # 加载检查点（如果指定）
-    if resume_from_checkpoint and os.path.exists(resume_from_checkpoint):
-        start_iteration, start_frames = load_checkpoint(
-            resume_from_checkpoint, policy, value_module, optim
-        )
     value_module = ValueOperator(
         module=module,
         in_keys=[("agents", "observation")],
@@ -201,6 +223,11 @@ def train(cfg: DictConfig):  # noqa: F821
     )
     optim = torch.optim.Adam(loss_module.parameters(), cfg.train.lr)
 
+    # 加载检查点（如果指定）
+    if resume_from_checkpoint and os.path.exists(resume_from_checkpoint):
+        start_iteration, start_frames = load_checkpoint(
+            resume_from_checkpoint, policy, value_module, optim
+        )
     # Logging
     if cfg.logger.backend:
         model_name = (
@@ -297,6 +324,7 @@ def train(cfg: DictConfig):  # noqa: F821
 
                 log_evaluation(logger, rollouts, env_test, evaluation_time, step=i)
                 save_checkpoint(logger, policy, value_module, optim, i, total_frames)
+                save_rollout(logger, rollouts, i, total_frames)
 
         if cfg.logger.backend == "wandb":
             logger.experiment.log({}, commit=True)
