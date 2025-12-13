@@ -86,52 +86,60 @@ class RolloutVisualizer:
         # 1. 速度大小
         fig.add_trace(
             go.Scatter(x=time_steps, y=data["vel_magnitude"][batch_idx, :, agent_idx],
-                      mode='lines', name='Velocity Magnitude', line=dict(color='blue')),
+                      mode='lines', name='Velocity Magnitude', line=dict(color='blue'),
+                      legendgroup="vel_magnitude", showlegend=True),
             row=1, col=1
         )
         
         # 2. 速度分量
         fig.add_trace(
             go.Scatter(x=time_steps, y=data["vel"][batch_idx, :, agent_idx, 0],
-                      mode='lines', name='Velocity X', line=dict(color='red')),
+                      mode='lines', name='Velocity X', line=dict(color='red'),
+                      legendgroup="vel_components", showlegend=True),
             row=1, col=2
         )
         fig.add_trace(
             go.Scatter(x=time_steps, y=data["vel"][batch_idx, :, agent_idx, 1],
-                      mode='lines', name='Velocity Y', line=dict(color='green')),
+                      mode='lines', name='Velocity Y', line=dict(color='green'),
+                      legendgroup="vel_components", showlegend=True),
             row=1, col=2
         )
         
         # 3. 加速度大小
         fig.add_trace(
             go.Scatter(x=time_steps, y=data["acc_magnitude"][batch_idx, :, agent_idx],
-                      mode='lines', name='Acceleration Magnitude', line=dict(color='purple')),
+                      mode='lines', name='Acceleration Magnitude', line=dict(color='purple'),
+                      legendgroup="acc_magnitude", showlegend=True),
             row=1, col=3
         )
         
         # 4. 转向角
         fig.add_trace(
             go.Scatter(x=time_steps, y=data["act_steer"][batch_idx, :, agent_idx],
-                      mode='lines', name='Steering Angle', line=dict(color='orange')),
+                      mode='lines', name='Steering Angle', line=dict(color='orange'),
+                      legendgroup="steering_angle", showlegend=True),
             row=1, col=4
         )
         
         # 5. 到参考路径的距离
         fig.add_trace(
             go.Scatter(x=time_steps, y=data["distance_ref"][batch_idx, :, agent_idx],
-                      mode='lines', name='Distance to Reference', line=dict(color='brown')),
+                      mode='lines', name='Distance to Reference', line=dict(color='brown'),
+                      legendgroup="distance_ref", showlegend=True),
             row=2, col=1
         )
         
         # 6. 动作分量
         fig.add_trace(
             go.Scatter(x=time_steps, y=data["actions"][batch_idx, :, agent_idx, 0],
-                      mode='lines', name='Action 0', line=dict(color='cyan')),
+                      mode='lines', name='Action 0', line=dict(color='cyan'),
+                      legendgroup="action_components", showlegend=True),
             row=2, col=2
         )
         fig.add_trace(
             go.Scatter(x=time_steps, y=data["actions"][batch_idx, :, agent_idx, 1],
-                      mode='lines', name='Action 1', line=dict(color='magenta')),
+                      mode='lines', name='Action 1', line=dict(color='magenta'),
+                      legendgroup="action_components", showlegend=True),
             row=2, col=2
         )
         
@@ -140,14 +148,16 @@ class RolloutVisualizer:
                          data["is_collision_with_lanelets"][batch_idx, :, agent_idx]
         fig.add_trace(
             go.Scatter(x=time_steps, y=collision_data,
-                      mode='lines', name='Collisions', line=dict(color='red')),
+                      mode='lines', name='Collisions', line=dict(color='red'),
+                      legendgroup="collisions", showlegend=True),
             row=2, col=3
         )
         
         # 8. 动作对数概率
         fig.add_trace(
             go.Scatter(x=time_steps, y=data["action_log_probs"][batch_idx, :, agent_idx],
-                      mode='lines', name='Action Log Prob', line=dict(color='blue')),
+                      mode='lines', name='Action Log Prob', line=dict(color='blue'),
+                      legendgroup="action_log_prob", showlegend=True),
             row=2, col=4
         )
         
@@ -155,8 +165,7 @@ class RolloutVisualizer:
             title=f'Agent {agent_idx} Data Analysis (Batch {batch_idx})',
             height=800,  # 调整高度以适应2x4布局
             width=1600,  # 增加宽度以适应2x4布局
-            hovermode='x unified',
-            showlegend=True
+            hovermode='x unified'
         )
         
         # 设置每个子图的网格线
@@ -187,7 +196,9 @@ class RolloutVisualizer:
                 y=positions[:, 1],
                 mode='lines',
                 name=f'Agent {agent_idx}',
-                line=dict(width=2)
+                line=dict(width=2),
+                legendgroup="trajectories",
+                showlegend=True
             ), row=1, col=1)
         
         # 2. 速度比较
@@ -197,7 +208,9 @@ class RolloutVisualizer:
                 y=data["vel_magnitude"][batch_idx, :, agent_idx],
                 mode='lines',
                 name=f'Agent {agent_idx}',
-                line=dict(width=1.5)
+                line=dict(width=1.5),
+                legendgroup="velocity",
+                showlegend=True
             ), row=1, col=2)
         
         # 3. 转向角比较
@@ -207,7 +220,9 @@ class RolloutVisualizer:
                 y=data["act_steer"][batch_idx, :, agent_idx],
                 mode='lines',
                 name=f'Agent {agent_idx}',
-                line=dict(width=1.5)
+                line=dict(width=1.5),
+                legendgroup="steering",
+                showlegend=True
             ), row=2, col=1)
         
         # 4. 到参考路径的距离
@@ -217,7 +232,9 @@ class RolloutVisualizer:
                 y=data["distance_ref"][batch_idx, :, agent_idx],
                 mode='lines',
                 name=f'Agent {agent_idx}',
-                line=dict(width=1.5)
+                line=dict(width=1.5),
+                legendgroup="distance",
+                showlegend=True
             ), row=2, col=2)
         
         # 5. 碰撞事件
@@ -229,7 +246,9 @@ class RolloutVisualizer:
                 y=collision_data,
                 mode='lines',
                 name=f'Agent {agent_idx}',
-                line=dict(width=1.5)
+                line=dict(width=1.5),
+                legendgroup="collisions",
+                showlegend=True
             ), row=3, col=1)
         
         # 6. 动作对数概率
@@ -239,16 +258,16 @@ class RolloutVisualizer:
                 y=data["action_log_probs"][batch_idx, :, agent_idx],
                 mode='lines',
                 name=f'Agent {agent_idx}',
-                line=dict(width=1.5)
+                line=dict(width=1.5),
+                legendgroup="log_prob",
+                showlegend=True
             ), row=3, col=2)
         
         fig.update_layout(
             title=f'Rollout Summary Dashboard (Batch {batch_idx})',
             height=1500,
             width=1200,
-            hovermode='x unified',
-            showlegend=True,
-            legend_title='Agent'
+            hovermode='x unified'
         )
         
         # 更新x轴标签
@@ -419,14 +438,13 @@ def visualize_your_rollout(rollouts, output_dir="./rollout_visualizations", show
     return figures, html_links
 
 if __name__ == "__main__":
-    rollout_file_path = "/home/yons/Graduation/rl_occt/outputs/2025-12-01/14-16-53/rollouts/rollout_iter_90_frames_5460000.pt"
+    rollout_file_path = "outputs/2025-12-11/22-46-06/rollouts/rollout_iter_420_frames_25260000.pt"
     
     try:
         print(f"正在加载rollout文件: {rollout_file_path}")
         rollouts = load_rollout(rollout_file_path)
         
-        # 输出目录（绝对路径）
-        output_dir = f"./rollout_visualizations_{os.path.basename(rollout_file_path).split('.')[0]}"
+        output_dir = f"outputs/rollout_vis/rollout_visualizations_{os.path.basename(rollout_file_path).split('.')[0]}"
         output_dir_abs = os.path.abspath(output_dir)
         # 确保输出目录存在（避免可视化时创建失败）
         os.makedirs(output_dir_abs, exist_ok=True)
@@ -440,7 +458,7 @@ if __name__ == "__main__":
             # 只保留文件名（不管原路径是相对还是绝对）
             summary_html_name = os.path.basename(summary_link_entry)
             
-            # 启动本地HTTP服务器（修复端口占用问题，用更兼容的方式）
+            # 启动本地HTTP服务器（--directory 指定根目录为输出目录）
             port = 8000
             # 终止占用端口的进程（Windows用taskkill，Linux/Mac用fuser）
             if os.name == "nt":  # Windows系统
