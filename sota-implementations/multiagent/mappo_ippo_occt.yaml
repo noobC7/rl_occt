@@ -4,11 +4,18 @@ env:
   max_steps: 200
   scenario_name: "occt_scenario"
   scenario:
-    n_agents: 3
-    task_class: 0
-    platoon_vel_mean: 7.0
-    platoon_vel_var: 4.0
+    n_agents: 5
+    task_class: 1
+    platoon_vel_mean: 5.0
+    platoon_vel_var: 2.0
     is_observe_distance_to_boundaries: False # False means observe future left and right boundaries
+    # reward weights
+    reward_progress: 10
+    reward_vel: 5
+    reward_reach_goal: 0
+    reward_track_reference_vel: 5
+    reward_track_reference_spacing: 5
+
   device: ??? # These values will be populated dynamically
   vmas_envs: ???
 
