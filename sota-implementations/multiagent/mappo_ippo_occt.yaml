@@ -5,13 +5,13 @@ env:
   scenario_name: "occt_scenario"
   scenario:
     n_agents: 5
-    task_class: 1
+    task_class: 0
     platoon_vel_mean: 5.0
     platoon_vel_var: 2.0
     is_observe_distance_to_boundaries: False # False means observe future left and right boundaries
     # reward weights
-    reward_progress: 10
-    reward_vel: 5
+    reward_progress: 0
+    reward_vel: 0
     reward_reach_goal: 0
     reward_track_reference_vel: 5
     reward_track_reference_spacing: 5
@@ -43,8 +43,7 @@ train:
   lr: 5e-5
   max_grad_norm: 40.0
   device: ???
-  resume_from_checkpoint: None
-
+  resume_from_checkpoint: "/home/yons/Graduation/rl_occt/outputs/2025-12-22/14-52-44/checkpoints/checkpoint_iter_60_frames_3720000.pt"
 eval:
   evaluation_interval: 10
   evaluation_episodes: 200
@@ -53,3 +52,4 @@ logger:
   backend: swanlab # Delete to remove logging
   project_name: occt
   group_name: mlp
+  resume_swanlab_id: sj8wm30k2ixruam7w82jl

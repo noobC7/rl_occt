@@ -30,6 +30,9 @@ def init_logging(cfg, model_name: str):
             "group": cfg.logger.group_name or model_name,
             "project": cfg.logger.project_name
             or f"swanlab_{cfg.env.scenario_name}",
+            #"mode": "local",
+            "id": cfg.logger.resume_swanlab_id,
+            "resume": True,
         },
     )
     logger.log_hparams(cfg)

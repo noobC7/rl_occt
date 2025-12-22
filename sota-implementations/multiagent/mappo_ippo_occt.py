@@ -224,10 +224,20 @@ def train(cfg: DictConfig):  # noqa: F821
     optim = torch.optim.Adam(loss_module.parameters(), cfg.train.lr)
 
     # 加载检查点（如果指定）
-    if resume_from_checkpoint and os.path.exists(resume_from_checkpoint):
-        start_iteration, start_frames = load_checkpoint(
-            resume_from_checkpoint, policy, value_module, optim
-        )
+    if resume_from_checkpoint is not None:
+        if os.path.exists(resume_from_checkpoint):
+            start_iteration, start_frames = load_checkpoint(
+                resume_from_checkpoint, policy, value_module, optim
+            )
+            torchrl_logger.info(
+                f"Resumed training from checkpoint {resume_from_checkpoint} "
+                f"at iteration {start_iteration} and frame {start_frames}."
+            )
+        else:
+            torchrl_logger.warning(
+                f"Checkpoint path {resume_from_checkpoint} does not exist. "
+                "Training from scratch."
+            )
     # Logging
     if cfg.logger.backend:
         model_name = (
