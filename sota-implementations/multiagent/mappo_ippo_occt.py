@@ -24,7 +24,7 @@ from torchrl.modules.models.multiagent import MultiAgentMLP
 from torchrl.objectives import ClipPPOLoss, ValueEstimators
 from utils.logging import init_logging, log_evaluation, log_training
 from utils.utils import DoneTransform
-
+from omegaconf import DictConfig
 
 def rendering_callback(env, td):
     env.frames.append(env.render(mode="rgb_array", agent_index_focus=None))
@@ -83,7 +83,10 @@ def load_checkpoint(checkpoint_path, policy, value_module, optim):
     
     policy.load_state_dict(checkpoint['policy_state_dict'])
     value_module.load_state_dict(checkpoint['value_module_state_dict'])
-    optim.load_state_dict(checkpoint['optimizer_state_dict'])
+    if optim is not None:
+        optim.load_state_dict(checkpoint['optimizer_state_dict'])
+    else:
+        torchrl_logger.warning("Optimizer state dict not found in checkpoint.")
     
     iteration = checkpoint['iteration']
     total_frames = checkpoint['total_frames']
@@ -102,7 +105,7 @@ def train(cfg: DictConfig):  # noqa: F821
     # Seeding
     torch.manual_seed(cfg.seed)
     # 检查是否需要从检查点恢复
-    resume_from_checkpoint = getattr(cfg.train, 'resume_from_checkpoint', None)
+    resume_from_checkpoint = cfg.train.resume_from_checkpoint
     start_iteration = 0
     start_frames = 0
     # Sampling
@@ -346,5 +349,147 @@ def train(cfg: DictConfig):  # noqa: F821
         env_test.close()
 
 
+@hydra.main(version_base="1.1", config_path="", config_name="mappo_ippo_occt_eval")
+def eval(cfg: DictConfig):  # noqa: F821
+    # Device
+    cfg.train.device = "cpu" if not torch.cuda.device_count() else "cuda:0"
+    cfg.env.device = cfg.train.device
+
+    # Seeding
+    torch.manual_seed(cfg.seed)
+    resume_from_checkpoint = cfg.train.resume_from_checkpoint
+    start_iteration = 0
+    start_frames = 0
+
+    # Sampling
+    cfg.env.vmas_envs = cfg.collector.frames_per_batch // cfg.env.max_steps
+    cfg.collector.total_frames = cfg.collector.frames_per_batch * cfg.collector.n_iters
+    cfg.buffer.memory_size = cfg.collector.frames_per_batch
+
+    # Create env and env_test
+    env = VmasEnv(
+        scenario=cfg.env.scenario_name,
+        num_envs=cfg.env.vmas_envs,
+        continuous_actions=True,
+        max_steps=cfg.env.max_steps,
+        device=cfg.env.device,
+        seed=cfg.seed,
+        # Scenario kwargs
+        **cfg.env.scenario,
+    )
+    env = TransformedEnv(
+        env,
+        RewardSum(in_keys=[env.reward_key], out_keys=[("agents", "episode_reward")]),
+    )
+
+    env_test = VmasEnv(
+        scenario=cfg.env.scenario_name,
+        num_envs=cfg.eval.evaluation_episodes,
+        continuous_actions=True,
+        max_steps=cfg.env.max_steps,
+        device=cfg.env.device,
+        seed=cfg.seed,
+        # Scenario kwargs
+        **cfg.env.scenario,
+    )
+
+    # Policy
+    actor_net = nn.Sequential(
+        MultiAgentMLP(
+            n_agent_inputs=env.observation_spec["agents", "observation"].shape[-1],
+            n_agent_outputs=2
+            * env.full_action_spec_unbatched[env.action_key].shape[-1],
+            n_agents=env.n_agents,
+            centralised=False,
+            share_params=cfg.model.shared_parameters,
+            device=cfg.train.device,
+            depth=2,
+            num_cells=256,
+            activation_class=nn.Tanh,
+        ),
+        NormalParamExtractor(),
+    )
+    policy_module = TensorDictModule(
+        actor_net,
+        in_keys=[("agents", "observation")],
+        out_keys=[("agents", "loc"), ("agents", "scale")],
+    )
+    policy = ProbabilisticActor(
+        module=policy_module,
+        spec=env.full_action_spec_unbatched,
+        in_keys=[("agents", "loc"), ("agents", "scale")],
+        out_keys=[env.action_key],
+        distribution_class=TanhNormal,
+        distribution_kwargs={
+            "low": env.full_action_spec_unbatched[("agents", "action")].space.low,
+            "high": env.full_action_spec_unbatched[("agents", "action")].space.high,
+        },
+        return_log_prob=True,
+    )
+
+    # Critic
+    module = MultiAgentMLP(
+        n_agent_inputs=env.observation_spec["agents", "observation"].shape[-1],
+        n_agent_outputs=1,
+        n_agents=env.n_agents,
+        centralised=cfg.model.centralised_critic,
+        share_params=cfg.model.shared_parameters,
+        device=cfg.train.device,
+        depth=2,
+        num_cells=256,
+        activation_class=nn.Tanh,
+    )
+    value_module = ValueOperator(
+        module=module,
+        in_keys=[("agents", "observation")],
+    )
+
+    # 加载检查点（如果指定）
+    if resume_from_checkpoint is not None:
+        if os.path.exists(resume_from_checkpoint):
+            start_iteration, start_frames = load_checkpoint(
+                resume_from_checkpoint, policy, value_module, optim=None
+            )
+            torchrl_logger.info(
+                f"Resumed training from checkpoint {resume_from_checkpoint} "
+                f"at iteration {start_iteration} and frame {start_frames}."
+            )
+        else:
+            torchrl_logger.warning(
+                f"Checkpoint path {resume_from_checkpoint} does not exist. "
+                "Training from scratch."
+            )
+    # Logging
+    if cfg.logger.backend:
+        model_name = (
+            ("Het" if not cfg.model.shared_parameters else "")
+            + ("MA" if cfg.model.centralised_critic else "I")
+            + "PPO"
+        )
+        logger = init_logging(cfg, model_name)
+
+    total_frames = start_frames
+        
+    evaluation_start = time.time()
+    with torch.no_grad(), set_exploration_type(ExplorationType.DETERMINISTIC):
+        env_test.frames = []
+        rollouts = env_test.rollout(
+            max_steps=cfg.env.max_steps,
+            policy=policy,
+            callback=rendering_callback,
+            auto_cast_to_device=True,
+            break_when_any_done=False,
+        )
+        evaluation_time = time.time() - evaluation_start
+        log_evaluation(logger, rollouts, env_test, evaluation_time, step=0)
+        save_rollout(logger, rollouts, 0, total_frames)
+
+    if not env.is_closed:
+        env.close()
+    if not env_test.is_closed:
+        env_test.close()
+
+
 if __name__ == "__main__":
+    #eval()
     train()
