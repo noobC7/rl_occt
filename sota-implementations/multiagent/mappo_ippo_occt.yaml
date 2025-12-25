@@ -1,20 +1,29 @@
 seed: 0
 
 env:
-  max_steps: 200
+  max_steps: 400
   scenario_name: "occt_scenario"
   scenario:
     n_agents: 5
     task_class: 0
-    platoon_vel_mean: 5.0
-    platoon_vel_var: 2.0
+    platoon_vel_mean: 3.0
+    platoon_vel_var: 0.0
     is_observe_distance_to_boundaries: False # False means observe future left and right boundaries
     # reward weights
+    
     reward_progress: 10
     reward_vel: 10
-    reward_reach_goal: 0
-    reward_track_reference_vel: 10
-    reward_track_reference_spacing: 10
+    reward_goal: 10
+    penalty_ref_vel_error: -10
+    penalty_ref_space_error: -10
+    penalty_close_to_lanelets: -10
+    penalty_close_to_agents: 10
+    penalty_deviate_from_ref_path: -10
+    penalty_change_steering: -10
+    penalty_collide_with_agents: -10
+    penalty_collide_with_boundaries: -10
+    penalty_backward: -10
+    threshold_change_steering: 0.1
 
   device: ??? # These values will be populated dynamically
   vmas_envs: ???
@@ -50,7 +59,7 @@ eval:
 
 logger:
   backend: swanlab # Delete to remove logging
-  project_name: occt
-  group_name: mlp
+  project_name: occt251225
+  group_name: mlp_inD_reward_adjust
   resume_swanlab_id: None # copy from swanlab page
   mode: cloud

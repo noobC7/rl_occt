@@ -226,21 +226,20 @@ def train(cfg: DictConfig):  # noqa: F821
     )
     optim = torch.optim.Adam(loss_module.parameters(), cfg.train.lr)
 
-    # 加载检查点（如果指定）
-    if resume_from_checkpoint is not None:
-        if os.path.exists(resume_from_checkpoint):
-            start_iteration, start_frames = load_checkpoint(
-                resume_from_checkpoint, policy, value_module, optim
-            )
-            torchrl_logger.info(
-                f"Resumed training from checkpoint {resume_from_checkpoint} "
-                f"at iteration {start_iteration} and frame {start_frames}."
-            )
-        else:
-            torchrl_logger.warning(
-                f"Checkpoint path {resume_from_checkpoint} does not exist. "
-                "Training from scratch."
-            )
+    if os.path.exists(resume_from_checkpoint):
+        start_iteration, start_frames = load_checkpoint(
+            resume_from_checkpoint, policy, value_module, optim
+        )
+        torchrl_logger.info(
+            f"Resumed training from checkpoint {resume_from_checkpoint} "
+            f"at iteration {start_iteration} and frame {start_frames}."
+        )
+    else:
+        torchrl_logger.warning(
+            f"Checkpoint path {resume_from_checkpoint} does not exist. "
+            "Training from scratch."
+        )
+
     # Logging
     if cfg.logger.backend:
         model_name = (
@@ -362,10 +361,10 @@ def eval(cfg: DictConfig):  # noqa: F821
     start_frames = 0
 
     # Sampling
-    cfg.env.vmas_envs = cfg.collector.frames_per_batch // cfg.env.max_steps
+    cfg.env.vmas_envs = 1
     cfg.collector.total_frames = cfg.collector.frames_per_batch * cfg.collector.n_iters
     cfg.buffer.memory_size = cfg.collector.frames_per_batch
-
+    
     # Create env and env_test
     env = VmasEnv(
         scenario=cfg.env.scenario_name,
@@ -445,8 +444,7 @@ def eval(cfg: DictConfig):  # noqa: F821
     )
 
     # 加载检查点（如果指定）
-    if resume_from_checkpoint is not None:
-        if os.path.exists(resume_from_checkpoint):
+    if os.path.exists(resume_from_checkpoint):
             start_iteration, start_frames = load_checkpoint(
                 resume_from_checkpoint, policy, value_module, optim=None
             )
@@ -454,11 +452,11 @@ def eval(cfg: DictConfig):  # noqa: F821
                 f"Resumed training from checkpoint {resume_from_checkpoint} "
                 f"at iteration {start_iteration} and frame {start_frames}."
             )
-        else:
-            torchrl_logger.warning(
-                f"Checkpoint path {resume_from_checkpoint} does not exist. "
-                "Training from scratch."
-            )
+    else:
+        torchrl_logger.warning(
+            f"Checkpoint path {resume_from_checkpoint} does not exist. "
+            "Training from scratch."
+        )
     # Logging
     if cfg.logger.backend:
         model_name = (
