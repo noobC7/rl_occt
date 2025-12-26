@@ -6,24 +6,39 @@ env:
   scenario:
     n_agents: 5
     task_class: 0
+    is_rand_init_vel: False
+    init_vel: 0.0
+    init_arc_pos: 5.0
     platoon_vel_mean: 3.0
     platoon_vel_var: 0.0
     is_observe_distance_to_boundaries: False # False means observe future left and right boundaries
     # reward weights
-    
-    reward_progress: 10
-    reward_vel: 10
-    reward_goal: 10
-    penalty_ref_vel_error: -10
+    reward_progress: 0.0
+    reward_vel: 0
+    reward_goal: 0
+    penalty_ref_vel_error: -50       # 降低量级，避免过度惩罚
     penalty_ref_space_error: -10
-    penalty_close_to_lanelets: -10
-    penalty_close_to_agents: 10
+    penalty_near_boundary: -10
+    penalty_near_other_agents: -20     # 修正为负数，惩罚靠近其他车辆
     penalty_deviate_from_ref_path: -10
     penalty_change_steering: -10
-    penalty_collide_with_agents: -10
-    penalty_collide_with_boundaries: -10
-    penalty_backward: -10
-    threshold_change_steering: 0.1
+    penalty_collide_with_agents: -100  # 提升为最重惩罚，优先避免碰撞
+    penalty_collide_with_boundaries: -100
+    penalty_backward: -200           # 降低量级，仍强惩罚但不碾压碰撞惩罚
+    
+    # reward_progress: 0
+    # reward_vel: 0
+    # reward_goal: 100
+    # penalty_ref_vel_error: -10
+    # penalty_ref_space_error: -0
+    # penalty_near_boundary: -0
+    # penalty_near_other_agents: -0
+    # penalty_deviate_from_ref_path: -10
+    # penalty_change_steering: -0
+    # penalty_collide_with_agents: -20
+    # penalty_collide_with_boundaries: -0
+    # penalty_backward: -0
+    # threshold_change_steering: 0.1
 
   device: ??? # These values will be populated dynamically
   vmas_envs: ???
