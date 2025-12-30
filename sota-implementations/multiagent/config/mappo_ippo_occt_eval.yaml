@@ -1,0 +1,68 @@
+seed: 0
+
+env:
+  max_steps: 400
+  scenario_name: "occt_scenario"
+  scenario:
+    n_agents: 3
+    task_class: 0
+    is_rand_init_vel: False
+    init_vel: 0.0
+    init_arc_pos: 5.0
+    platoon_vel_mean: 3.0
+    platoon_vel_var: 0.0
+    use_frenet_ref: True
+    is_observe_distance_to_boundaries: False # False means observe future left and right boundaries
+    # reward weights
+    reward_progress: 0.0
+    reward_vel: 0
+    reward_goal: 0
+    reward_track_ref_vel: 100        
+    reward_track_ref_space: 100
+    reward_track_ref_path: 100
+    penalty_near_boundary: -50
+    penalty_near_other_agents: -80
+    penalty_change_steering: -10
+    penalty_collide_with_agents: -80
+    penalty_outside_boundaries: -50
+    penalty_backward: -200
+    
+
+  device: ??? # These values will be populated dynamically
+  vmas_envs: ???
+
+model:
+  shared_parameters: True
+  centralised_critic: True  # MAPPO if True, IPPO if False
+
+collector:
+  frames_per_batch: 60_000 # Frames sampled each sampling iteration
+  n_iters: 500 # Number of sampling/training iterations
+  total_frames: ???
+
+buffer:
+  memory_size: ???
+
+loss:
+  gamma: 0.9
+  lmbda: 0.9
+  entropy_eps: 0
+  clip_epsilon: 0.2
+
+train:
+  num_epochs: 45  # optimization steps per batch of data collected
+  minibatch_size: 4096 # size of minibatches used in each epoch
+  lr: 5e-5
+  max_grad_norm: 40.0
+  device: ???
+  resume_from_checkpoint: /home/yons/Graduation/rl_occt/outputs/2025-12-29/20-45-39/checkpoints/checkpoint_iter_10_frames_660000.pt # absolute path
+eval:
+  evaluation_interval: 10
+  evaluation_episodes: 200
+
+logger:
+  backend: swanlab # Delete to remove logging
+  project_name: occt
+  group_name: mlp_INTERACTION_reward_adjust
+  resume_swanlab_id: None # copy from swanlab page
+  mode: local #disabled
