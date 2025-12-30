@@ -1,14 +1,13 @@
 seed: 0
 
 env:
-  max_steps: 400
+  max_steps: 200
   scenario_name: "occt_scenario"
   scenario:
     n_agents: 3
     task_class: 0
-    is_rand_init_vel: False
+    is_rand_init_vel: True
     is_rand_arc_pos: True
-    n_points_short_term: 5
     init_vel: 0.0
     init_arc_pos: 5.0
     platoon_vel_mean: 3.0

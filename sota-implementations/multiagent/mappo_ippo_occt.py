@@ -348,7 +348,7 @@ def train(cfg: DictConfig):  # noqa: F821
         env_test.close()
 
 
-@hydra.main(version_base="1.1", config_path="config", config_name="mappo_ippo_occt_eval")
+@hydra.main(version_base="1.1", config_path="config", config_name="mappo_ippo_occt")
 def eval(cfg: DictConfig):  # noqa: F821
     # Device
     cfg.train.device = "cpu" if not torch.cuda.device_count() else "cuda:0"
@@ -489,5 +489,5 @@ def eval(cfg: DictConfig):  # noqa: F821
 
 
 if __name__ == "__main__":
-    train()
-    #eval()
+    #train()
+    eval()
