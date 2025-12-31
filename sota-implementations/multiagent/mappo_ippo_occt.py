@@ -8,6 +8,7 @@ import time
 import os
 import hydra
 import torch
+from tqdm import tqdm
 from tensordict.nn import TensorDictModule
 from tensordict.nn.distributions import NormalParamExtractor
 from torch import nn
@@ -252,9 +253,12 @@ def train(cfg: DictConfig):  # noqa: F821
     total_time = 0
     total_frames = start_frames
     sampling_start = time.time()
-    for i, tensordict_data in enumerate(collector, start=start_iteration):
-        torchrl_logger.info(f"\nIteration {i}")
-
+    total_iters = cfg.collector.n_iters
+    pbar = tqdm(enumerate(collector, start=start_iteration), 
+             total=total_iters, 
+             desc="Training", 
+             unit="iter")
+    for i, tensordict_data in pbar:
         sampling_time = time.time() - sampling_start
 
         with torch.no_grad():
@@ -270,8 +274,9 @@ def train(cfg: DictConfig):  # noqa: F821
 
         training_tds = []
         training_start = time.time()
-        for _ in range(cfg.train.num_epochs):
+        for epoch_idx in range(cfg.train.num_epochs):
             for _ in range(cfg.collector.frames_per_batch // cfg.train.minibatch_size):
+                pbar.set_postfix({"Epoch": f"{epoch_idx+1}/{cfg.train.num_epochs}"})
                 subdata = replay_buffer.sample()
                 loss_vals = loss_module(subdata)
                 training_tds.append(loss_vals.detach())
@@ -348,7 +353,7 @@ def train(cfg: DictConfig):  # noqa: F821
         env_test.close()
 
 
-@hydra.main(version_base="1.1", config_path="config", config_name="mappo_ippo_occt")
+@hydra.main(version_base="1.1", config_path="config", config_name="mappo_ippo_occt_eval")
 def eval(cfg: DictConfig):  # noqa: F821
     # Device
     cfg.train.device = "cpu" if not torch.cuda.device_count() else "cuda:0"
@@ -489,5 +494,5 @@ def eval(cfg: DictConfig):  # noqa: F821
 
 
 if __name__ == "__main__":
-    #train()
-    eval()
+    train()
+    #eval()
