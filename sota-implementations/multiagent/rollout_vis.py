@@ -26,260 +26,255 @@ class RolloutVisualizer:
             "batch_id": np.arange(batch_size)
         }
         
-        # 提取动作数据
-        data["actions"] = rollouts["agents"]["action"].cpu().numpy()  # [batch, time, agent, 2]
         data["action_log_probs"] = rollouts["agents"]["action_log_prob"].cpu().numpy()  # [batch, time, agent]
         
-        # 提取info中的数据
         info = rollouts["agents"]["info"]
         data["act_steer"] = info["act_steer"].squeeze(-1).cpu().numpy()  # [batch, time, agent]
         data["act_acc"] = info["act_acc"].squeeze(-1).cpu().numpy()  # [batch, time, agent]
         data["pos"] = info["pos"].cpu().numpy()  # [batch, time, agent, 2]
-        data["vel"] = info["vel"].cpu().numpy()  # [batch, time, agent, 2]
+        data["error_space"] = info["error_space"].cpu().numpy()  # [batch, time, agent, 2]
+        data["error_vel"] = info["error_vel"].squeeze(-1).cpu().numpy()  # [batch, time, agent]
+        data["vel_magnitude"] = info["vel_norm"].squeeze(-1).cpu().numpy()  # [batch, time, agent]
         data["rot"] = info["rot"].squeeze(-1).cpu().numpy()  # [batch, time, agent]
         data["distance_ref"] = info["distance_ref"].squeeze(-1).cpu().numpy()  # [batch, time, agent]
         data["is_collision_with_agents"] = info["is_collision_with_agents"].squeeze(-1).cpu().numpy()  # [batch, time, agent]
         data["is_collision_with_lanelets"] = info["is_collision_with_lanelets"].squeeze(-1).cpu().numpy()  # [batch, time, agent]
-        
-        # 尝试从状态量中获取速度v，而不是计算速度大小
-        # 首先检查是否存在状态量
-        if "observation" in rollouts["agents"] or "state" in rollouts["agents"]:
-            state_key = "observation" if "observation" in rollouts["agents"] else "state"
-            state_data = rollouts["agents"][state_key].cpu().numpy()
-            
-            # 检查状态量维度是否为5
-            if state_data.ndim == 4 and state_data.shape[-1] == 5:
-                # 假设第4个维度（索引为3）是速度v
-                data["vel_magnitude"] = state_data[..., 3]
-                print("已从状态量中获取速度v作为速度大小")
-            else:
-                # 如果找不到合适的状态量，则使用原来的方法计算速度大小
-                data["vel_magnitude"] = np.sqrt(data["vel"][..., 0]**2 + data["vel"][..., 1]** 2)
-                print("未找到合适的状态量，使用vel的x和y分量计算速度大小")
-        else:
-            # 如果找不到状态量，则使用原来的方法计算速度大小
-            data["vel_magnitude"] = np.sqrt(data["vel"][..., 0]**2 + data["vel"][..., 1]** 2)
-            print("未找到状态量，使用vel的x和y分量计算速度大小")
-        
-        # 计算加速度（通过速度差分）
-        acc = np.diff(data["vel"], axis=1)
-        # 填充第一个时间步的加速度为0
-        acc = np.concatenate([np.zeros_like(acc[:, :1]), acc], axis=1)
-        data["acc"] = acc
-        data["acc_magnitude"] = np.sqrt(acc[..., 0]**2 + acc[..., 1]** 2)
-        
+        data["reward_track_ref_vel"] = info["reward_track_ref_vel"].squeeze(-1).cpu().numpy()  # [batch, time, agent]
+        data["reward_track_ref_space"] = info["reward_track_ref_space"].squeeze(-1).cpu().numpy()  # [batch, time, agent]
+        data["reward_track_ref_heading"] = info["reward_track_ref_heading"].squeeze(-1).cpu().numpy()  # [batch, time, agent]
+        data["reward_track_ref_path"] = info["reward_track_ref_path"].squeeze(-1).cpu().numpy()  # [batch, time, agent]
+        data["penalty_change_steering"] = info["penalty_change_steering"].squeeze(-1).cpu().numpy()  # [batch, time, agent]
+        data["penalty_change_acc"] = info["penalty_change_acc"].squeeze(-1).cpu().numpy()  # [batch, time, agent]
+
+        # penalty_collide_with_agents: -100
+        # penalty_outside_boundaries: -100
         return data, batch_size, time_steps, num_agents
     
     def plot_agent_data(self, data, batch_idx=0, agent_idx=0):
-        """绘制单个agent的多种数据曲线 - 修改为2x4布局"""
-        # 创建子图 - 修改为2行4列布局
-        fig = make_subplots(rows=2, cols=4, 
+        fig = make_subplots(rows=2, cols=7, 
                            subplot_titles=(
-                               'Velocity Magnitude', 'Velocity Components',
-                               'Acceleration Magnitude', 'Steering Angle',
-                               'Distance to Reference', 'Action Components',
-                               'Collisions', 'Action Log Probability'
+                               'Speed[m/s]','Acceleration[m/s^2]','Heading[degree]', 'Steering Angle[degree]',
+                               'Distance to Reference[m]','Vel Error[m/s]','Space Error[m]',
+                               'Reward Track Ref Vel', 'Reward Track Ref Space', 'Reward Track Ref Heading',
+                               'Reward Track Ref Path', 'Penalty Change Steering', 'Penalty Change Acceleration',
+                               'Action Log Probability',
                            ))
         
         time_steps = data["time_step"]
-        
-        # 1. 速度大小
+        color_list=["blue","purple","green","orange","brown","red","black","cyan","magenta","gray","olive","pink","teal","navy","salmon","turquoise"]
         fig.add_trace(
             go.Scatter(x=time_steps, y=data["vel_magnitude"][batch_idx, :, agent_idx],
-                      mode='lines', name='Velocity Magnitude', line=dict(color='blue'),
-                      legendgroup="vel_magnitude", showlegend=True),
+                      mode='lines', name='Speed', line=dict(color=color_list[0]),
+                      legendgroup="speed", showlegend=True),
             row=1, col=1
         )
         
-        # 2. 速度分量
+        
         fig.add_trace(
-            go.Scatter(x=time_steps, y=data["vel"][batch_idx, :, agent_idx, 0],
-                      mode='lines', name='Velocity X', line=dict(color='red'),
-                      legendgroup="vel_components", showlegend=True),
-            row=1, col=2
-        )
-        fig.add_trace(
-            go.Scatter(x=time_steps, y=data["vel"][batch_idx, :, agent_idx, 1],
-                      mode='lines', name='Velocity Y', line=dict(color='green'),
-                      legendgroup="vel_components", showlegend=True),
+            go.Scatter(x=time_steps, y=data["act_acc"][batch_idx, :, agent_idx],
+                      mode='lines', name='Acceleration', line=dict(color=color_list[1]),
+                      legendgroup="acceleration", showlegend=True),
             row=1, col=2
         )
         
-        # 3. 加速度大小
         fig.add_trace(
-            go.Scatter(x=time_steps, y=data["acc_magnitude"][batch_idx, :, agent_idx],
-                      mode='lines', name='Acceleration Magnitude', line=dict(color='purple'),
-                      legendgroup="acc_magnitude", showlegend=True),
+            go.Scatter(x=time_steps, y=data["rot"][batch_idx, :, agent_idx]/np.pi*180,
+                      mode='lines', name='Heading', line=dict(color=color_list[2]),
+                      legendgroup="heading_angle", showlegend=True),
             row=1, col=3
         )
-        
-        # 4. 转向角
+
         fig.add_trace(
-            go.Scatter(x=time_steps, y=data["act_steer"][batch_idx, :, agent_idx],
-                      mode='lines', name='Steering Angle', line=dict(color='orange'),
+            go.Scatter(x=time_steps, y=data["act_steer"][batch_idx, :, agent_idx]/np.pi*180,
+                      mode='lines', name='Steering Angle', line=dict(color=color_list[3]),
                       legendgroup="steering_angle", showlegend=True),
             row=1, col=4
         )
         
-        # 5. 到参考路径的距离
         fig.add_trace(
             go.Scatter(x=time_steps, y=data["distance_ref"][batch_idx, :, agent_idx],
-                      mode='lines', name='Distance to Reference', line=dict(color='brown'),
+                      mode='lines', name='Distance to Reference', line=dict(color=color_list[4]),
                       legendgroup="distance_ref", showlegend=True),
+            row=1, col=5
+        )
+        # collision_data = data["is_collision_with_agents"][batch_idx, :, agent_idx] + \
+        #                  data["is_collision_with_lanelets"][batch_idx, :, agent_idx]
+        # fig.add_trace(
+        #     go.Scatter(x=time_steps, y=collision_data,
+        #               mode='lines', name='Collisions', line=dict(color=color_list[5]),
+        #               legendgroup="collisions", showlegend=True),
+        #     row=1, col=6
+        # )
+        fig.add_trace(
+            go.Scatter(x=time_steps, y=data["error_vel"][batch_idx, :, agent_idx],
+                      mode='lines', name='Vel Error', line=dict(color=color_list[5]),
+                      legendgroup="vel_error", showlegend=True),
+            row=1, col=6
+        )
+        fig.add_trace(
+            go.Scatter(x=time_steps, y=data["error_space"][batch_idx, :, agent_idx,0],
+                      mode='lines', name='Space Front', line=dict(color=color_list[6]),
+                      legendgroup="space_front", showlegend=True),
+            row=1, col=7
+        )
+        fig.add_trace(
+            go.Scatter(x=time_steps, y=data["error_space"][batch_idx, :, agent_idx,1],
+                      mode='lines', name='Space Back', line=dict(color=color_list[7]),
+                      legendgroup="space_back", showlegend=True),
+            row=1, col=7
+        )
+        
+        fig.add_trace(
+            go.Scatter(x=time_steps, y=data["reward_track_ref_vel"][batch_idx, :, agent_idx],
+                      mode='lines', name='Reward Track Ref Vel', line=dict(color=color_list[7]),
+                      legendgroup="reward_track_ref_vel", showlegend=True),
             row=2, col=1
         )
-        
-        # 6. 动作分量
         fig.add_trace(
-            go.Scatter(x=time_steps, y=data["actions"][batch_idx, :, agent_idx, 0],
-                      mode='lines', name='Action 0', line=dict(color='cyan'),
-                      legendgroup="action_components", showlegend=True),
+            go.Scatter(x=time_steps, y=data["reward_track_ref_space"][batch_idx, :, agent_idx],
+                      mode='lines', name='Reward Track Ref Space', line=dict(color=color_list[8]),
+                      legendgroup="reward_track_ref_space", showlegend=True),
             row=2, col=2
         )
         fig.add_trace(
-            go.Scatter(x=time_steps, y=data["actions"][batch_idx, :, agent_idx, 1],
-                      mode='lines', name='Action 1', line=dict(color='magenta'),
-                      legendgroup="action_components", showlegend=True),
-            row=2, col=2
-        )
-        
-        # 7. 碰撞事件
-        collision_data = data["is_collision_with_agents"][batch_idx, :, agent_idx] + \
-                         data["is_collision_with_lanelets"][batch_idx, :, agent_idx]
-        fig.add_trace(
-            go.Scatter(x=time_steps, y=collision_data,
-                      mode='lines', name='Collisions', line=dict(color='red'),
-                      legendgroup="collisions", showlegend=True),
+            go.Scatter(x=time_steps, y=data["reward_track_ref_heading"][batch_idx, :, agent_idx],
+                      mode='lines', name='Reward Track Ref Heading', line=dict(color=color_list[9]),
+                      legendgroup="reward_track_ref_heading", showlegend=True),
             row=2, col=3
         )
-        
-        # 8. 动作对数概率
         fig.add_trace(
-            go.Scatter(x=time_steps, y=data["action_log_probs"][batch_idx, :, agent_idx],
-                      mode='lines', name='Action Log Prob', line=dict(color='blue'),
-                      legendgroup="action_log_prob", showlegend=True),
+            go.Scatter(x=time_steps, y=data["reward_track_ref_path"][batch_idx, :, agent_idx],
+                      mode='lines', name='Reward Track Ref Path', line=dict(color=color_list[10]),
+                      legendgroup="reward_track_ref_path", showlegend=True),
             row=2, col=4
         )
+        fig.add_trace(
+            go.Scatter(x=time_steps, y=data["penalty_change_steering"][batch_idx, :, agent_idx],
+                      mode='lines', name='Penalty Change Steering', line=dict(color=color_list[11]),
+                      legendgroup="penalty_change_steering", showlegend=True),
+            row=2, col=5
+        )
+        fig.add_trace(
+            go.Scatter(x=time_steps, y=data["penalty_change_acc"][batch_idx, :, agent_idx],
+                      mode='lines', name='Penalty Change Acceleration', line=dict(color=color_list[12]),
+                      legendgroup="penalty_change_acc", showlegend=True),
+            row=2, col=6
+        )
         
+        fig.add_trace(
+            go.Scatter(x=time_steps, y=data["action_log_probs"][batch_idx, :, agent_idx],
+                      mode='lines', name='Action Log Prob', line=dict(color=color_list[13]),
+                      legendgroup="action_log_prob", showlegend=True),
+            row=2, col=7
+        )
         fig.update_layout(
             title=f'Agent {agent_idx} Data Analysis (Batch {batch_idx})',
             height=800,  # 调整高度以适应2x4布局
-            width=1600,  # 增加宽度以适应2x4布局
+            width=2200,  # 增加宽度以适应2x4布局
             hovermode='x unified'
         )
         
-        # 设置每个子图的网格线
-        for i in range(1, 3):
-            for j in range(1, 5):
-                fig.update_xaxes(title_text='Time Step', row=i, col=j, showgrid=True)
-        
         return fig
-    
     def create_summary_dashboard(self, data, batch_idx=0):
-        """创建汇总仪表板，包含所有主要图表"""
-        # 创建子图
-        fig = make_subplots(rows=3, cols=2, 
-                           subplot_titles=(
-                               'Agent Trajectories',
-                               'Velocity Comparison',
-                               'Steering Angle Comparison',
-                               'Distance to Reference',
-                               'Collisions Over Time',
-                               'Action Log Probability'
-                           ))
+        """创建汇总仪表板（4个独立图表，每个图表图例在右上方）"""
+        # 方案2.1：返回4个独立图表（推荐，灵活性更高）
+        figs = []
         
-        # 1. 轨迹图（简化版）
+        # 1. 轨迹图
+        fig1 = go.Figure()
         for agent_idx in range(data["pos"].shape[2]):
             positions = data["pos"][batch_idx, :, agent_idx]
-            fig.add_trace(go.Scatter(
+            fig1.add_trace(go.Scatter(
                 x=positions[:, 0], 
                 y=positions[:, 1],
                 mode='lines',
                 name=f'Agent {agent_idx}',
-                line=dict(width=2),
-                legendgroup="trajectories",
-                showlegend=True
-            ), row=1, col=1)
+                line=dict(width=2)
+            ))
+        fig1.update_layout(
+            title=f'Agent Trajectories (Batch {batch_idx})',
+            height=400,
+            width=500,
+            hovermode='x unified',
+            # 图例放在右上方
+            legend=dict(
+                x=1.0, y=1.0,
+                xanchor='right', yanchor='top',
+                bgcolor='rgba(255,255,255,0.8)'  # 半透明白色背景，避免遮挡
+            )
+        )
+        figs.append(fig1)
         
         # 2. 速度比较
+        fig2 = go.Figure()
         for agent_idx in range(data["vel_magnitude"].shape[2]):
-            fig.add_trace(go.Scatter(
+            fig2.add_trace(go.Scatter(
                 x=data["time_step"],
                 y=data["vel_magnitude"][batch_idx, :, agent_idx],
                 mode='lines',
                 name=f'Agent {agent_idx}',
-                line=dict(width=1.5),
-                legendgroup="velocity",
-                showlegend=True
-            ), row=1, col=2)
+                line=dict(width=1.5)
+            ))
+        fig2.update_layout(
+            title=f'Speed Comparison (Batch {batch_idx})',
+            height=400,
+            width=500,
+            hovermode='x unified',
+            legend=dict(
+                x=1.0, y=1.0,
+                xanchor='right', yanchor='top',
+                bgcolor='rgba(255,255,255,0.8)'
+            )
+        )
+        figs.append(fig2)
         
-        # 3. 转向角比较
-        for agent_idx in range(data["act_steer"].shape[2]):
-            fig.add_trace(go.Scatter(
+        # 3. 航向角比较
+        fig3 = go.Figure()
+        for agent_idx in range(data["rot"].shape[2]):
+            fig3.add_trace(go.Scatter(
                 x=data["time_step"],
-                y=data["act_steer"][batch_idx, :, agent_idx],
+                y=data["rot"][batch_idx, :, agent_idx],
                 mode='lines',
                 name=f'Agent {agent_idx}',
-                line=dict(width=1.5),
-                legendgroup="steering",
-                showlegend=True
-            ), row=2, col=1)
+                line=dict(width=1.5)
+            ))
+        fig3.update_layout(
+            title=f'Heading Angle Comparison (Batch {batch_idx})',
+            height=400,
+            width=500,
+            hovermode='x unified',
+            legend=dict(
+                x=1.0, y=1.0,
+                xanchor='right', yanchor='top',
+                bgcolor='rgba(255,255,255,0.8)'
+            )
+        )
+        figs.append(fig3)
         
         # 4. 到参考路径的距离
+        fig4 = go.Figure()
         for agent_idx in range(data["distance_ref"].shape[2]):
-            fig.add_trace(go.Scatter(
+            fig4.add_trace(go.Scatter(
                 x=data["time_step"],
                 y=data["distance_ref"][batch_idx, :, agent_idx],
                 mode='lines',
                 name=f'Agent {agent_idx}',
-                line=dict(width=1.5),
-                legendgroup="distance",
-                showlegend=True
-            ), row=2, col=2)
-        
-        # 5. 碰撞事件
-        for agent_idx in range(data["is_collision_with_agents"].shape[2]):
-            collision_data = data["is_collision_with_agents"][batch_idx, :, agent_idx] + \
-                             data["is_collision_with_lanelets"][batch_idx, :, agent_idx]
-            fig.add_trace(go.Scatter(
-                x=data["time_step"],
-                y=collision_data,
-                mode='lines',
-                name=f'Agent {agent_idx}',
-                line=dict(width=1.5),
-                legendgroup="collisions",
-                showlegend=True
-            ), row=3, col=1)
-        
-        # 6. 动作对数概率
-        for agent_idx in range(data["action_log_probs"].shape[2]):
-            fig.add_trace(go.Scatter(
-                x=data["time_step"],
-                y=data["action_log_probs"][batch_idx, :, agent_idx],
-                mode='lines',
-                name=f'Agent {agent_idx}',
-                line=dict(width=1.5),
-                legendgroup="log_prob",
-                showlegend=True
-            ), row=3, col=2)
-        
-        fig.update_layout(
-            title=f'Rollout Summary Dashboard (Batch {batch_idx})',
-            height=1500,
-            width=1200,
-            hovermode='x unified'
+                line=dict(width=1.5)
+            ))
+        fig4.update_layout(
+            title=f'Distance to Reference (Batch {batch_idx})',
+            height=400,
+            width=500,
+            hovermode='x unified',
+            legend=dict(
+                x=1.0, y=1.0,
+                xanchor='right', yanchor='top',
+                bgcolor='rgba(255,255,255,0.8)'
+            )
         )
+        figs.append(fig4)
         
-        # 更新x轴标签
-        for i in range(1, 4):
-            for j in range(1, 3):
-                if i > 1 or j > 1:  # 除了第一个子图
-                    fig.update_xaxes(title_text='Time Step', row=i, col=j)
-        
-        fig.update_xaxes(title_text='X Position', row=1, col=1)
-        fig.update_yaxes(title_text='Y Position', row=1, col=1)
-        
-        return fig
+        return figs
     
     def visualize_rollout(self, rollouts, output_dir="./rollout_visualizations"):
         """主可视化函数 - 简化版，只生成一个包含所有agent仪表板的HTML文件"""
@@ -335,13 +330,18 @@ class RolloutVisualizer:
         
         # 添加汇总仪表板
         dashboard_fig = self.create_summary_dashboard(data, batch_idx=batch_idx)
-        dashboard_div = dashboard_fig.to_html(full_html=False, include_plotlyjs=True)
+        dashboard_div = [dash.to_html(full_html=False, include_plotlyjs=True) for dash in dashboard_fig]
+        
         html_content += f'''
             <div class="chart-container">
                 <h2>汇总仪表板</h2>
-                {dashboard_div}
+                <!-- 单栏容器：Flex并排，自动换行适配屏幕 -->
+                <div class="single-column-charts" style="display: flex; gap: 15px; flex-wrap: wrap; align-items: flex-start;">
+                    {''.join(dashboard_div)}
+                </div>
             </div>
         '''
+            
         
         # 为每个agent添加详细仪表板（2x4布局）
         for agent_idx in range(num_agents):
@@ -438,7 +438,7 @@ def visualize_your_rollout(rollouts, output_dir="./rollout_visualizations", show
     return figures, html_links
 
 if __name__ == "__main__":
-    rollout_file_path = "outputs/2025-12-11/22-46-06/rollouts/rollout_iter_420_frames_25260000.pt"
+    rollout_file_path = "/home/yons/Graduation/rl_occt/outputs/2026-01-03/22-42-36/rollouts/rollout_iter_20_frames_1260000.pt"
     
     try:
         print(f"正在加载rollout文件: {rollout_file_path}")
