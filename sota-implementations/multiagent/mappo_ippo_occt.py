@@ -255,6 +255,7 @@ def train(cfg: DictConfig):  # noqa: F821
     sampling_start = time.time()
     total_iters = cfg.collector.n_iters
     pbar = tqdm(enumerate(collector, start=start_iteration), 
+             initial=start_iteration,
              total=total_iters, 
              desc="Training", 
              unit="iter")
