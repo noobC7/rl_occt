@@ -21,7 +21,7 @@ from torchrl.envs import RewardSum, TransformedEnv
 from torchrl.envs.libs.vmas import VmasEnv
 from torchrl.envs.utils import ExplorationType, set_exploration_type
 from torchrl.modules import ProbabilisticActor, TanhNormal, ValueOperator
-from torchrl.modules.models.multiagent import MultiAgentMLP
+from torchrl.modules.models.multiagent import MultiAgentMLP,GroupSharedMLP
 from torchrl.objectives import ClipPPOLoss, ValueEstimators
 from utils.logging import init_logging, log_evaluation, log_training
 from utils.utils import DoneTransform
@@ -125,6 +125,7 @@ def train(cfg: DictConfig):  # noqa: F821
         # Scenario kwargs
         **cfg.env.scenario,
     )
+    
     env = TransformedEnv(
         env,
         RewardSum(in_keys=[env.reward_key], out_keys=[("agents", "episode_reward")]),
@@ -141,15 +142,18 @@ def train(cfg: DictConfig):  # noqa: F821
         **cfg.env.scenario,
     )
 
+    n_shared_agents = env.n_agents - 1
+    # share_params = torch.tensor([0] + [1] * n_shared_agents, device=cfg.train.device)
+    share_params = torch.tensor([0] * env.n_agents , device=cfg.train.device)
     # Policy
     actor_net = nn.Sequential(
-        MultiAgentMLP(
+        GroupSharedMLP( 
             n_agent_inputs=env.observation_spec["agents", "observation"].shape[-1],
             n_agent_outputs=2
             * env.full_action_spec_unbatched[env.action_key].shape[-1],
             n_agents=env.n_agents,
             centralised=False,
-            share_params=cfg.model.shared_parameters,
+            share_params=share_params,
             device=cfg.train.device,
             depth=2,
             num_cells=256,
@@ -176,12 +180,12 @@ def train(cfg: DictConfig):  # noqa: F821
     )
 
     # Critic
-    module = MultiAgentMLP(
+    module = GroupSharedMLP(
         n_agent_inputs=env.observation_spec["agents", "observation"].shape[-1],
         n_agent_outputs=1,
         n_agents=env.n_agents,
         centralised=cfg.model.centralised_critic,
-        share_params=cfg.model.shared_parameters,
+        share_params=share_params,
         device=cfg.train.device,
         depth=2,
         num_cells=256,
