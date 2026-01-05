@@ -1,0 +1,73 @@
+seed: 40
+
+env:
+  max_steps: 200
+  scenario_name: "occt_scenario"
+  scenario:
+    n_agents: 5
+    task_class: 0
+    is_rand_arc_pos: False
+    init_vel_mean: 5.0
+    init_vel_std: 1.0 # useless if is_rand_init_vel is False
+    still_space: 10
+    init_arc_pos: 5.0 # useless if is_rand_arc_pos is False
+    use_frenet_ref: True # True means use continuous frenet reference, False means use discrete reference
+    is_observe_distance_to_boundaries: False # False means observe future left and right boundaries
+    n_nearing_agents_observed: 2
+    # reward weights
+    reward_progress: 0.0
+    reward_vel: 0
+    reward_goal: 0
+    reward_track_ref_vel: 100        
+    reward_track_ref_space: 0
+    reward_track_ref_heading: 50
+    reward_track_ref_path: 60
+    penalty_near_boundary: -0
+    penalty_near_other_agents: -0
+    penalty_change_steering: -20
+    penalty_change_acc: -0.002
+    threshold_change_steering: 0.015
+    threshold_change_acc: 0.05
+    penalty_collide_with_agents: -100
+    penalty_outside_boundaries: -100
+    penalty_backward: 0
+    
+
+  device: ??? # These values will be populated dynamically
+  vmas_envs: ???
+
+model:
+  shared_parameters: False
+  centralised_critic: True  # MAPPO if True, IPPO if False
+
+collector:
+  frames_per_batch: 60_000 # Frames sampled each sampling iteration
+  n_iters: 500 # Number of sampling/training iterations
+  total_frames: ???
+
+buffer:
+  memory_size: ???
+
+loss:
+  gamma: 0.9
+  lmbda: 0.9
+  entropy_eps: 0
+  clip_epsilon: 0.2
+
+train:
+  num_epochs: 45  # optimization steps per batch of data collected
+  minibatch_size: 4096 # size of minibatches used in each epoch
+  lr: 5e-5
+  max_grad_norm: 40.0
+  device: ???
+  resume_from_checkpoint: None # absolute path
+eval:
+  evaluation_interval: 10
+  evaluation_episodes: 200  
+
+logger:
+  backend: swanlab # Delete to remove logging
+  project_name: occt250104
+  group_name: straight_road_n_plus_1
+  resume_swanlab_id: None # copy from swanlab page
+  mode: cloud
