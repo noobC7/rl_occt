@@ -1049,3 +1049,135 @@ class QMixer(Mixer):
         # Reshape and return
         q_tot = y.view(*bs, 1)
         return q_tot
+class GroupSharedMLP(nn.Module):
+    """
+    通用的分组共享多智能体MLP类（修复vmap兼容问题）
+    核心改进：移除原地索引赋值，改用非原地拼接，适配TorchRL的vmap批量处理
+    """
+    def __init__(
+        self,
+        n_agent_inputs: int | None,
+        n_agent_outputs: int,
+        n_agents: int,
+        *,
+        centralized: bool | None = None,
+        share_params: torch.Tensor | list,
+        device: torch.device | str | None = None,
+        depth: int | None = None,
+        num_cells: int | list[int] | None = None,
+        activation_class: type[nn.Module] = nn.Tanh,
+        use_td_params: bool = True,
+        **kwargs
+    ):
+        super().__init__()
+        self.n_agent_inputs = n_agent_inputs
+        self.n_agent_outputs = n_agent_outputs
+        self.n_agents = n_agents
+        self.centralized = centralized
+        self.device = torch.device(device) if device is not None else torch.device("cpu")
+        self.depth = depth if depth is not None else 3  # 适配TorchRL默认值
+        self.num_cells = num_cells if num_cells is not None else 32  # 适配TorchRL默认值
+        self.activation_class = activation_class
+        self.use_td_params = use_td_params
+
+        # 1. 处理分组标识（保持原有逻辑）
+        if isinstance(share_params, list):
+            self.share_groups = torch.tensor(share_params, device=self.device, dtype=torch.int64)
+        elif isinstance(share_params, torch.Tensor):
+            self.share_groups = share_params.to(self.device, dtype=torch.int64)
+        else:
+            raise ValueError(f"share_params必须是列表或张量，当前类型：{type(share_params)}")
+        
+        if len(self.share_groups) != self.n_agents:
+            raise ValueError(f"share_params长度({len(self.share_groups)})必须等于智能体数量({self.n_agents})")
+        
+        # 获取唯一分组ID和分组-智能体映射（记录智能体原始索引，用于后续排序）
+        self.unique_groups = torch.unique(self.share_groups)
+        self.group_info = {}  # 存储：分组ID → (智能体索引列表, 分组内MLP)
+        for group_id in self.unique_groups:
+            group_id_int = group_id.item()
+            # 获取该分组的智能体索引（按原始顺序）
+            agent_indices = torch.where(self.share_groups == group_id)[0].tolist()
+            # 计算分组输入维度（中心化/去中心化）
+            if self.centralized:
+                group_input_dim = self.n_agent_inputs * self.n_agents  # 全局维度
+            else:
+                group_input_dim = self.n_agent_inputs  # 本地维度
+            # 创建分组内MLP（share_params=True，组内共享）
+            group_mlp = MultiAgentMLP(
+                n_agent_inputs=group_input_dim,
+                n_agent_outputs=self.n_agent_outputs,
+                n_agents=len(agent_indices),
+                centralized=self.centralized,
+                share_params=True,  # 严格遵循TorchRL 0.10.0规则
+                device=self.device,
+                depth=self.depth,
+                num_cells=self.num_cells,
+                activation_class=self.activation_class,
+                use_td_params=self.use_td_params,
+                **kwargs
+            )
+            self.group_info[group_id_int] = (agent_indices, group_mlp)
+            # 将分组MLP注册为子模块（必须！否则参数不会被优化）
+            self.add_module(f"group_mlp_{group_id_int}", group_mlp)
+
+        # 预生成：智能体索引到分组输出位置的映射（用于排序）
+        self.agent_to_sort_idx = {}
+        total_idx = 0
+        for group_id in self.unique_groups:
+            agent_indices = self.group_info[group_id.item()][0]
+            for agent_idx in agent_indices:
+                self.agent_to_sort_idx[agent_idx] = total_idx
+                total_idx += 1
+
+    def forward(self, obs: torch.Tensor) -> torch.Tensor:
+        """
+        前向传播：非原地拼接实现，兼容vmap批量处理
+        obs: 输入张量，形状 = (*batch_dims, n_agents, n_agent_inputs)
+        返回：输出张量，形状 = (*batch_dims, n_agents, n_agent_outputs)
+        """
+        # 步骤1：遍历所有分组，计算每个分组的输出，并记录对应智能体索引
+        group_outputs = []  # 存储：(智能体索引列表, 分组输出张量)
+        for group_id in self.unique_groups:
+            group_id_int = group_id.item()
+            agent_indices, group_mlp = self.group_info[group_id_int]
+            
+            # 处理输入：中心化/去中心化
+            if self.centralized:
+                # 中心化：所有分组共享全局观测（无需拆分）
+                group_obs = obs
+            else:
+                # 去中心化：拆分该分组的本地观测
+                group_obs = obs[..., agent_indices, :]  # (*B, n_group_agents, n_inputs)
+            
+            # 分组MLP前向传播
+            group_out = group_mlp(group_obs)  # (*B, n_group_agents, n_outputs)
+            group_outputs.append((agent_indices, group_out))
+
+        # 步骤2：收集所有智能体的输出（按原始顺序），避免原地赋值
+        # 初始化空列表，按智能体原始索引填充
+        batch_shape = obs.shape[:-2]
+        agent_outputs = [None] * self.n_agents
+        
+        for agent_indices, group_out in group_outputs:
+            # 遍历该分组的每个智能体
+            for idx_in_group, agent_idx in enumerate(agent_indices):
+                # 提取单个智能体的输出（兼容任意batch维度）
+                agent_out = group_out[..., idx_in_group:idx_in_group+1, :]  # (*B, 1, n_outputs)
+                agent_outputs[agent_idx] = agent_out
+
+        # 步骤3：拼接所有智能体的输出（非原地操作，兼容vmap）
+        # agent_outputs已按原始索引排序，直接拼接
+        output = torch.cat(agent_outputs, dim=-2)  # (*B, n_agents, n_outputs)
+        
+        return output
+
+    def __repr__(self):
+        return (
+            f"GroupSharedMultiAgentMLP(\n"
+            f"  n_agents={self.n_agents},\n"
+            f"  share_groups={self.share_groups.tolist()},\n"
+            f"  unique_groups={self.unique_groups.tolist()},\n"
+            f"  centralized={self.centralized}\n"
+            f")"
+        )
