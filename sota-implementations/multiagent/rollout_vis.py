@@ -35,6 +35,7 @@ class RolloutVisualizer:
         data["error_space"] = info["error_space"].cpu().numpy()  # [batch, time, agent, 2]
         data["error_vel"] = info["error_vel"].squeeze(-1).cpu().numpy()  # [batch, time, agent]
         data["vel_magnitude"] = info["vel_norm"].squeeze(-1).cpu().numpy()  # [batch, time, agent]
+        data["ref_vel"] = info["ref_vel"].squeeze(-1).cpu().numpy()  # [batch, time, agent]
         data["rot"] = info["rot"].squeeze(-1).cpu().numpy()  # [batch, time, agent]
         data["distance_ref"] = info["distance_ref"].squeeze(-1).cpu().numpy()  # [batch, time, agent]
         data["is_collision_with_agents"] = info["is_collision_with_agents"].squeeze(-1).cpu().numpy()  # [batch, time, agent]
@@ -66,6 +67,12 @@ class RolloutVisualizer:
             go.Scatter(x=time_steps, y=data["vel_magnitude"][batch_idx, :, agent_idx],
                       mode='lines', name='Speed', line=dict(color=color_list[0]),
                       legendgroup="speed", showlegend=True),
+            row=1, col=1
+        )
+        fig.add_trace(
+            go.Scatter(x=time_steps, y=data["ref_vel"][batch_idx, :, agent_idx],
+                      mode='lines', name='Ref Vel', line=dict(color=color_list[10]),
+                      legendgroup="ref_vel", showlegend=True),
             row=1, col=1
         )
         
@@ -438,7 +445,7 @@ def visualize_your_rollout(rollouts, output_dir="./rollout_visualizations", show
     return figures, html_links
 
 if __name__ == "__main__":
-    rollout_file_path = "/home/yons/Graduation/rl_occt/outputs/2026-01-03/22-42-36/rollouts/rollout_iter_20_frames_1260000.pt"
+    rollout_file_path = "/home/yons/Graduation/rl_occt/outputs/2026-01-05/20-29-28/rollouts/rollout_iter_330_frames_19860000.pt"
     
     try:
         print(f"正在加载rollout文件: {rollout_file_path}")
