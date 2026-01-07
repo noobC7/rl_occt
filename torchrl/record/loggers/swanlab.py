@@ -7,9 +7,10 @@ from __future__ import annotations
 import warnings
 from collections.abc import Sequence
 from typing import Any
-
+from torchvision.io import write_video
 import torch
 import swanlab
+import os
 from omegaconf import DictConfig
 
 from torchrl.record.loggers.common import Logger
@@ -91,12 +92,28 @@ class SwanLabLogger(Logger):
         """
         import wandb
         fps = kwargs.pop("fps", self.video_fps)
+        caption = kwargs.pop("caption", "")
         wandb_video = wandb.Video(video, fps=fps, format='gif')
-        log_data = {name: swanlab.Video(wandb_video._path)}
+        swanlab_video = swanlab.Video(wandb_video._path, caption=name+caption)
+        swanlab_video._image.step=name.split("/")[-1] # seems swanlab doesn't support file name revise, use last part of name(path idx)
         self.experiment.log(
-            {name: log_data},
+            {name: swanlab_video},
             **kwargs,
         )
+    def log_mp4_local(self, video: torch.Tensor, **kwargs) -> None:
+        """Log videos inputs to wandb.
+
+        Args:
+            video (Tensor): The video to be logged.
+            **kwargs: Other keyword arguments. By construction, log_video
+                supports 'step' (integer indicating the step index), 'format'
+                (default is 'mp4') and 'fps' (defaults to ``self.video_fps``). Other kwargs are
+                passed as-is to the :obj:`experiment.log` method.
+        """
+        fps = kwargs.pop("fps", self.video_fps)
+        caption = kwargs.pop("caption", "")
+        file_path = os.path.join(self.experiment.public.run_dir,"media", caption)
+        write_video(file_path, video[0].permute(0, 2, 3, 1), fps=fps, options = {"crf": "17"})
     
     def log_hparams(self, cfg: DictConfig | dict) -> None:
         """Logs hyperparameters.
