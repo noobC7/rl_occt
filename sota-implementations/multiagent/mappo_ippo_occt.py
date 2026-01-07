@@ -23,12 +23,16 @@ from torchrl.envs.utils import ExplorationType, set_exploration_type
 from torchrl.modules import ProbabilisticActor, TanhNormal, ValueOperator
 from torchrl.modules.models.multiagent import MultiAgentMLP,GroupSharedMLP
 from torchrl.objectives import ClipPPOLoss, ValueEstimators
-from utils.logging import init_logging, log_evaluation, log_training
+from utils.logging import init_logging, log_evaluation, log_training, log_batch_video
 from utils.utils import DoneTransform
 from omegaconf import DictConfig
 
 def rendering_callback(env, td):
-    env.frames.append(env.render(mode="rgb_array", agent_index_focus=None))
+    env.frames.append(env.render(mode="rgb_array", agent_index_focus=round(env.scenario.n_agents/2)-1)) 
+
+def rendering_batch_callback(env, td):
+    for env_index in range(env.num_envs):
+        env.frames[env_index].append(env.render(mode="rgb_array", agent_index_focus=round(env.scenario.n_agents/2)-1, env_index=env_index)) 
 
 def save_checkpoint(logger, policy, value_module, optim, iteration, total_frames):
     """保存训练检查点"""
@@ -49,7 +53,7 @@ def save_checkpoint(logger, policy, value_module, optim, iteration, total_frames
     
     torch.save(checkpoint, checkpoint_path)
     torchrl_logger.info(f"Checkpoint saved at {checkpoint_path}")
-def save_rollout(logger, rollouts, iteration, total_frames):
+def save_rollout(logger, rollouts, iteration, total_frames, suffix=""):
     """
     保存rollout对象到rollout文件夹中
     
@@ -63,13 +67,13 @@ def save_rollout(logger, rollouts, iteration, total_frames):
         rollout_path: 保存的rollout文件路径
     """
     # 创建rollout保存目录
-    rollout_dir = os.path.join(logger.save_dir, "rollouts")
+    rollout_dir = os.path.join(logger.experiment.public.run_dir,"rollouts")
     os.makedirs(rollout_dir, exist_ok=True)
     
     # 构建保存路径
     rollout_path = os.path.join(
         rollout_dir, 
-        f"rollout_iter_{iteration}_frames_{total_frames}.pt"
+        f"rollout_iter_{iteration}_frames_{total_frames}{suffix}.pt"
     )
     
     # 保存rollout对象
@@ -113,7 +117,7 @@ def train(cfg: DictConfig):  # noqa: F821
     cfg.env.vmas_envs = cfg.collector.frames_per_batch // cfg.env.max_steps
     cfg.collector.total_frames = cfg.collector.frames_per_batch * cfg.collector.n_iters
     cfg.buffer.memory_size = cfg.collector.frames_per_batch
-
+    cfg.env.scenario.eval_mode = False
     # Create env and env_test
     env = VmasEnv(
         scenario=cfg.env.scenario_name,
@@ -130,7 +134,9 @@ def train(cfg: DictConfig):  # noqa: F821
         env,
         RewardSum(in_keys=[env.reward_key], out_keys=[("agents", "episode_reward")]),
     )
-
+    if cfg.collector.n_iters == 0:
+        # only evaluation, fix the map path batch id
+        cfg.env.scenario.eval_mode = True 
     env_test = VmasEnv(
         scenario=cfg.env.scenario_name,
         num_envs=cfg.eval.evaluation_episodes,
@@ -142,9 +148,10 @@ def train(cfg: DictConfig):  # noqa: F821
         **cfg.env.scenario,
     )
 
-    n_shared_agents = env.n_agents - 1
-    # share_params = torch.tensor([0] + [1] * n_shared_agents, device=cfg.train.device)
-    share_params = torch.tensor([0] * env.n_agents , device=cfg.train.device)
+    if cfg.model.shared_parameters:
+        share_params = torch.tensor([0] * cfg.env.scenario.n_agents , device=cfg.train.device)
+    else:
+        share_params = torch.tensor([0] + [1] * (cfg.env.scenario.n_agents - 1), device=cfg.train.device)
     # Policy
     actor_net = nn.Sequential(
         GroupSharedMLP( 
@@ -195,7 +202,7 @@ def train(cfg: DictConfig):  # noqa: F821
         module=module,
         in_keys=[("agents", "observation")],
     )
-    if cfg.train.num_epochs > 0:
+    if cfg.collector.n_iters > 0:
         collector = SyncDataCollector(
             env,
             policy,
@@ -256,21 +263,49 @@ def train(cfg: DictConfig):  # noqa: F821
 
     total_time = 0
     total_frames = start_frames
-    if cfg.train.num_epochs == 0:
+    if cfg.collector.n_iters == 0:
         # only for evaluation
+        print(f"[OcctCRMap] Path num: {env_test.scenario.get_occt_cr_path_num()}")
+        # for eval_path_idx in range(env_test.scenario.get_occt_cr_path_num()):
+        #     print(f"[OcctCRMap] Eval path {eval_path_idx} rollouting...")
+        #     env_test.scenario.reset_occt_cr_map(eval_path_idx)
+        #     evaluation_start = time.time()
+        #     with torch.no_grad(), set_exploration_type(ExplorationType.DETERMINISTIC):
+        #         env_test.frames = []
+        #         rollouts = env_test.rollout(
+        #             max_steps=cfg.env.max_steps,
+        #             policy=policy,
+        #             callback=rendering_callback,
+        #             auto_cast_to_device=True,
+        #             break_when_any_done=True,
+        #         )
+        #         save_rollout(logger, rollouts, start_iteration, total_frames, suffix=f"_path{eval_path_idx}")
+        #         print(f"[OcctCRMap] Eval path {eval_path_idx} video encodeing...")
+        #         evaluation_time = time.time() - evaluation_start
+        #         log_evaluation(logger, rollouts, env_test, evaluation_time, \
+        #                        step=start_iteration, video_caption=f"iter_{start_iteration}_path_{eval_path_idx}.mp4")
+        #         print(f"[OcctCRMap] Eval path {eval_path_idx} finished.")
+        #         torch.cuda.empty_cache()
+        print(f"[OcctCRMap] Start Evaluation.")
         evaluation_start = time.time()
         with torch.no_grad(), set_exploration_type(ExplorationType.DETERMINISTIC):
-            env_test.frames = []
+            env_test.frames = [[] for _ in range(env_test.num_envs)]
             rollouts = env_test.rollout(
                 max_steps=cfg.env.max_steps,
                 policy=policy,
-                callback=rendering_callback,
+                callback=rendering_batch_callback,
                 auto_cast_to_device=True,
-                break_when_any_done=True,
+                break_when_any_done=False,
+                break_when_all_done=True,
             )
-            evaluation_time = time.time() - evaluation_start
-            log_evaluation(logger, rollouts, env_test, evaluation_time, step=0)
             save_rollout(logger, rollouts, start_iteration, total_frames)
+            evaluation_time = time.time() - evaluation_start
+            print(f"[OcctCRMap] Evaluation rollout finished, duration: {evaluation_time:.2f}s.")
+            # log_evaluation(logger, rollouts, env_test, evaluation_time, \
+            #                 step=start_iteration, video_caption=f"iter_{start_iteration}_path_{0}.mp4")
+            log_batch_video(logger, rollouts, env_test, iter = start_iteration)
+            video_encode_time = time.time() - evaluation_start - evaluation_time
+            print(f"[OcctCRMap] Evaluation video encode finished, duration: {video_encode_time:.2f}s.")
 
         if not env.is_closed:
             env.close()
@@ -363,12 +398,13 @@ def train(cfg: DictConfig):  # noqa: F821
                     break_when_any_done=False,
                     # We are running vectorized evaluation we do not want it to stop when just one env is done
                 )
-
+                eval_path_idx = int(env_test.scenario.road.batch_id[0].cpu().numpy())
                 evaluation_time = time.time() - evaluation_start
 
-                log_evaluation(logger, rollouts, env_test, evaluation_time, step=i)
+                log_evaluation(logger, rollouts, env_test, evaluation_time, 
+                               step=i, video_caption=f"path{eval_path_idx}")
                 save_checkpoint(logger, policy, value_module, optim, i, total_frames)
-                save_rollout(logger, rollouts, i, total_frames)
+                #save_rollout(logger, rollouts, i, total_frames, suffix=f"=path{eval_path_idx}")
 
         if cfg.logger.backend == "wandb":
             logger.experiment.log({}, commit=True)
