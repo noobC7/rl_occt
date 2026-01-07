@@ -5,7 +5,7 @@
 from __future__ import annotations
 
 import os
-
+from tqdm import tqdm
 import numpy as np
 import torch
 from tensordict import TensorDictBase
@@ -119,6 +119,7 @@ def log_evaluation(
     env_test: VmasEnv,
     evaluation_time: float,
     step: int,
+    video_caption: str = None,
 ):
     rollouts = list(rollouts.unbind(0))
     for k, r in enumerate(rollouts):
@@ -158,8 +159,33 @@ def log_evaluation(
         )
     if isinstance(logger, SwanLabLogger):
         logger.experiment.log(metrics_to_log)
-        logger.log_video("eval/video", vid, step=step)
+        logger.log_video("eval/video", vid, step=step, caption=video_caption)
     else:
         for key, value in metrics_to_log.items():
             logger.log_scalar(key.replace("/", "_"), value, step=step)
         logger.log_video("eval_video", vid, step=step)
+
+
+def log_batch_video(
+    logger: WandbLogger,
+    rollouts: TensorDictBase,
+    env_test: VmasEnv,
+    iter: int = None,
+):
+    rollouts = list(rollouts.unbind(0))
+    for k, r in enumerate(rollouts):
+        next_done = r.get(("next", "done")).sum(
+            tuple(range(r.batch_dims, r.get(("next", "done")).ndim)),
+            dtype=torch.bool,
+        )
+        done_index = next_done.nonzero(as_tuple=True)[0][
+            0
+        ]  # First done index for this traj
+        rollouts[k] = r[: done_index + 1]
+    assert isinstance(logger, SwanLabLogger), "logger must be SwanLabLogger"
+    for env_index in tqdm(range(env_test.num_envs), desc="Encoding videos"):
+        vid = torch.tensor(
+            np.transpose(env_test.frames[env_index][: rollouts[env_index].batch_size[0]], (0, 3, 1, 2)),
+            dtype=torch.uint8,
+        ).unsqueeze(0)
+        logger.log_mp4_local(vid, caption=f"iter_{iter}_path_{env_index}.mp4")
