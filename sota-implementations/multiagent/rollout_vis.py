@@ -18,12 +18,33 @@ class RolloutVisualizer:
         """从rollout对象中提取所需数据"""
         # 获取基础数据
         batch_size, time_steps, num_agents = rollouts["agents"].batch_size
+         # 获取有效时间步（参考logging.py中的实现）
+        rollout_list = list(rollouts.unbind(0))  # 按batch维度解绑
+        valid_time_steps = []
+        
+        for batch_idx, r in enumerate(rollout_list):
+            # 计算done字段的总和，确定轨迹结束位置
+            next_done = r.get(("next", "done")).sum(
+                tuple(range(r.batch_dims, r.get(("next", "done")).ndim)),
+                dtype=torch.bool,
+            )
+            
+            # 找到第一个done的位置
+            if next_done.any():
+                done_index = next_done.nonzero(as_tuple=True)[0][0]  # 第一个done索引
+                valid_len = done_index + 1  # 有效时间步长度
+                valid_time_steps.append(valid_len)
+                print(f"Batch {batch_idx}有效时间步：{valid_len}")
+            else:
+                valid_time_steps.append(time_steps)  # 如果没有done，使用全部时间步
+                print(f"Batch {batch_idx}有效时间步：{time_steps} (无done标记)")
         
         # 确保数据在CPU上
         data = {
             "time_step": np.arange(time_steps),
             "agent_id": np.arange(num_agents),
-            "batch_id": np.arange(batch_size)
+            "batch_id": np.arange(batch_size),
+            "valid_time_steps": valid_time_steps  # 新增：有效时间步列表
         }
         
         data["action_log_probs"] = rollouts["agents"]["action_log_prob"].cpu().numpy()  # [batch, time, agent]
@@ -61,16 +82,18 @@ class RolloutVisualizer:
                                'Action Log Probability',
                            ))
         
-        time_steps = data["time_step"]
+        valid_time_steps = data["valid_time_steps"][batch_idx]
+        time_steps = data["time_step"][:valid_time_steps]
+
         color_list=["blue","purple","green","orange","brown","red","black","cyan","magenta","gray","olive","pink","teal","navy","salmon","turquoise"]
         fig.add_trace(
-            go.Scatter(x=time_steps, y=data["vel_magnitude"][batch_idx, :, agent_idx],
+            go.Scatter(x=time_steps, y=data["vel_magnitude"][batch_idx, :valid_time_steps, agent_idx],
                       mode='lines', name='Speed', line=dict(color=color_list[0]),
                       legendgroup="speed", showlegend=True),
             row=1, col=1
         )
         fig.add_trace(
-            go.Scatter(x=time_steps, y=data["ref_vel"][batch_idx, :, agent_idx],
+            go.Scatter(x=time_steps, y=data["ref_vel"][batch_idx, :valid_time_steps, agent_idx],
                       mode='lines', name='Ref Vel', line=dict(color=color_list[10]),
                       legendgroup="ref_vel", showlegend=True),
             row=1, col=1
@@ -78,34 +101,34 @@ class RolloutVisualizer:
         
         
         fig.add_trace(
-            go.Scatter(x=time_steps, y=data["act_acc"][batch_idx, :, agent_idx],
+            go.Scatter(x=time_steps, y=data["act_acc"][batch_idx, :valid_time_steps, agent_idx],
                       mode='lines', name='Acceleration', line=dict(color=color_list[1]),
                       legendgroup="acceleration", showlegend=True),
             row=1, col=2
         )
         
         fig.add_trace(
-            go.Scatter(x=time_steps, y=data["rot"][batch_idx, :, agent_idx]/np.pi*180,
+            go.Scatter(x=time_steps, y=data["rot"][batch_idx, :valid_time_steps, agent_idx]/np.pi*180,
                       mode='lines', name='Heading', line=dict(color=color_list[2]),
                       legendgroup="heading_angle", showlegend=True),
             row=1, col=3
         )
 
         fig.add_trace(
-            go.Scatter(x=time_steps, y=data["act_steer"][batch_idx, :, agent_idx]/np.pi*180,
+            go.Scatter(x=time_steps, y=data["act_steer"][batch_idx, :valid_time_steps, agent_idx]/np.pi*180,
                       mode='lines', name='Steering Angle', line=dict(color=color_list[3]),
                       legendgroup="steering_angle", showlegend=True),
             row=1, col=4
         )
         
         fig.add_trace(
-            go.Scatter(x=time_steps, y=data["distance_ref"][batch_idx, :, agent_idx],
+            go.Scatter(x=time_steps, y=data["distance_ref"][batch_idx, :valid_time_steps, agent_idx],
                       mode='lines', name='Distance to Reference', line=dict(color=color_list[4]),
                       legendgroup="distance_ref", showlegend=True),
             row=1, col=5
         )
-        # collision_data = data["is_collision_with_agents"][batch_idx, :, agent_idx] + \
-        #                  data["is_collision_with_lanelets"][batch_idx, :, agent_idx]
+        # collision_data = data["is_collision_with_agents"][batch_idx, :valid_time_steps, agent_idx] + \
+        #                  data["is_collision_with_lanelets"][batch_idx, :valid_time_steps, agent_idx]
         # fig.add_trace(
         #     go.Scatter(x=time_steps, y=collision_data,
         #               mode='lines', name='Collisions', line=dict(color=color_list[5]),
@@ -113,63 +136,63 @@ class RolloutVisualizer:
         #     row=1, col=6
         # )
         fig.add_trace(
-            go.Scatter(x=time_steps, y=data["error_vel"][batch_idx, :, agent_idx],
+            go.Scatter(x=time_steps, y=data["error_vel"][batch_idx, :valid_time_steps, agent_idx],
                       mode='lines', name='Vel Error', line=dict(color=color_list[5]),
                       legendgroup="vel_error", showlegend=True),
             row=1, col=6
         )
         fig.add_trace(
-            go.Scatter(x=time_steps, y=data["error_space"][batch_idx, :, agent_idx,0],
+            go.Scatter(x=time_steps, y=data["error_space"][batch_idx, :valid_time_steps, agent_idx,0],
                       mode='lines', name='Space Front', line=dict(color=color_list[6]),
                       legendgroup="space_front", showlegend=True),
             row=1, col=7
         )
         fig.add_trace(
-            go.Scatter(x=time_steps, y=data["error_space"][batch_idx, :, agent_idx,1],
+            go.Scatter(x=time_steps, y=data["error_space"][batch_idx, :valid_time_steps, agent_idx,1],
                       mode='lines', name='Space Back', line=dict(color=color_list[7]),
                       legendgroup="space_back", showlegend=True),
             row=1, col=7
         )
         
         fig.add_trace(
-            go.Scatter(x=time_steps, y=data["reward_track_ref_vel"][batch_idx, :, agent_idx],
+            go.Scatter(x=time_steps, y=data["reward_track_ref_vel"][batch_idx, :valid_time_steps, agent_idx],
                       mode='lines', name='Reward Track Ref Vel', line=dict(color=color_list[7]),
                       legendgroup="reward_track_ref_vel", showlegend=True),
             row=2, col=1
         )
         fig.add_trace(
-            go.Scatter(x=time_steps, y=data["reward_track_ref_space"][batch_idx, :, agent_idx],
+            go.Scatter(x=time_steps, y=data["reward_track_ref_space"][batch_idx, :valid_time_steps, agent_idx],
                       mode='lines', name='Reward Track Ref Space', line=dict(color=color_list[8]),
                       legendgroup="reward_track_ref_space", showlegend=True),
             row=2, col=2
         )
         fig.add_trace(
-            go.Scatter(x=time_steps, y=data["reward_track_ref_heading"][batch_idx, :, agent_idx],
+            go.Scatter(x=time_steps, y=data["reward_track_ref_heading"][batch_idx, :valid_time_steps, agent_idx],
                       mode='lines', name='Reward Track Ref Heading', line=dict(color=color_list[9]),
                       legendgroup="reward_track_ref_heading", showlegend=True),
             row=2, col=3
         )
         fig.add_trace(
-            go.Scatter(x=time_steps, y=data["reward_track_ref_path"][batch_idx, :, agent_idx],
+            go.Scatter(x=time_steps, y=data["reward_track_ref_path"][batch_idx, :valid_time_steps, agent_idx],
                       mode='lines', name='Reward Track Ref Path', line=dict(color=color_list[10]),
                       legendgroup="reward_track_ref_path", showlegend=True),
             row=2, col=4
         )
         fig.add_trace(
-            go.Scatter(x=time_steps, y=data["penalty_change_steering"][batch_idx, :, agent_idx],
+            go.Scatter(x=time_steps, y=data["penalty_change_steering"][batch_idx, :valid_time_steps, agent_idx],
                       mode='lines', name='Penalty Change Steering', line=dict(color=color_list[11]),
                       legendgroup="penalty_change_steering", showlegend=True),
             row=2, col=5
         )
         fig.add_trace(
-            go.Scatter(x=time_steps, y=data["penalty_change_acc"][batch_idx, :, agent_idx],
+            go.Scatter(x=time_steps, y=data["penalty_change_acc"][batch_idx, :valid_time_steps, agent_idx],
                       mode='lines', name='Penalty Change Acceleration', line=dict(color=color_list[12]),
                       legendgroup="penalty_change_acc", showlegend=True),
             row=2, col=6
         )
         
         fig.add_trace(
-            go.Scatter(x=time_steps, y=data["action_log_probs"][batch_idx, :, agent_idx],
+            go.Scatter(x=time_steps, y=data["action_log_probs"][batch_idx, :valid_time_steps, agent_idx],
                       mode='lines', name='Action Log Prob', line=dict(color=color_list[13]),
                       legendgroup="action_log_prob", showlegend=True),
             row=2, col=7
@@ -189,20 +212,34 @@ class RolloutVisualizer:
         
         # 1. 轨迹图
         fig1 = go.Figure()
+        t = data["time_step"]  # 时间步数组
+        valid_time_steps = data["valid_time_steps"][batch_idx]
         for agent_idx in range(data["pos"].shape[2]):
-            positions = data["pos"][batch_idx, :, agent_idx]
+            positions = data["pos"][batch_idx, :valid_time_steps, agent_idx]
+            x_vals = positions[:, 0]
+            y_vals = positions[:, 1]
+            
+            # 为每个点创建包含时间信息的悬停文本
+            hover_text = [
+                f"Agent {agent_idx}<br>Time Step: {int(step)}<br>X: {x:.2f}<br>Y: {y:.2f}"
+                for step, x, y in zip(t, x_vals, y_vals)
+            ]
+            
             fig1.add_trace(go.Scatter(
-                x=positions[:, 0], 
-                y=positions[:, 1],
-                mode='lines',
+                x=x_vals, 
+                y=y_vals,
+                mode='lines',  # 恢复为只显示线条
                 name=f'Agent {agent_idx}',
-                line=dict(width=2)
+                line=dict(width=2),  # 移除颜色渐变设置
+                text=hover_text,     # 绑定悬停文本
+                hoverinfo='text'     # 悬停时只显示自定义文本
             ))
+
         fig1.update_layout(
             title=f'Agent Trajectories (Batch {batch_idx})',
             height=400,
             width=500,
-            hovermode='x unified',
+            hovermode='x unified',  # 恢复原有的悬停模式
             # 图例放在右上方
             legend=dict(
                 x=1.0, y=1.0,
@@ -210,14 +247,20 @@ class RolloutVisualizer:
                 bgcolor='rgba(255,255,255,0.8)'  # 半透明白色背景，避免遮挡
             )
         )
+
+        fig1.update_layout(
+            xaxis=dict(scaleanchor="y", scaleratio=1),
+            yaxis=dict(scaleanchor="x", scaleratio=1)
+        )
+
         figs.append(fig1)
         
         # 2. 速度比较
         fig2 = go.Figure()
         for agent_idx in range(data["vel_magnitude"].shape[2]):
             fig2.add_trace(go.Scatter(
-                x=data["time_step"],
-                y=data["vel_magnitude"][batch_idx, :, agent_idx],
+                x=data["time_step"][:valid_time_steps],
+                y=data["vel_magnitude"][batch_idx, :valid_time_steps, agent_idx],
                 mode='lines',
                 name=f'Agent {agent_idx}',
                 line=dict(width=1.5)
@@ -239,8 +282,8 @@ class RolloutVisualizer:
         fig3 = go.Figure()
         for agent_idx in range(data["rot"].shape[2]):
             fig3.add_trace(go.Scatter(
-                x=data["time_step"],
-                y=data["rot"][batch_idx, :, agent_idx],
+                x=data["time_step"][:valid_time_steps],
+                y=data["rot"][batch_idx, :valid_time_steps, agent_idx],
                 mode='lines',
                 name=f'Agent {agent_idx}',
                 line=dict(width=1.5)
@@ -262,8 +305,8 @@ class RolloutVisualizer:
         fig4 = go.Figure()
         for agent_idx in range(data["distance_ref"].shape[2]):
             fig4.add_trace(go.Scatter(
-                x=data["time_step"],
-                y=data["distance_ref"][batch_idx, :, agent_idx],
+                x=data["time_step"][:valid_time_steps],
+                y=data["distance_ref"][batch_idx, :valid_time_steps, agent_idx],
                 mode='lines',
                 name=f'Agent {agent_idx}',
                 line=dict(width=1.5)
@@ -283,16 +326,13 @@ class RolloutVisualizer:
         
         return figs
     
-    def visualize_rollout(self, rollouts, output_dir="./rollout_visualizations"):
+    def visualize_rollout(self, rollouts, output_dir="./rollout_visualizations", batch_idx=0, html_file_name="rollout_visualization.html"):
         """主可视化函数 - 简化版，只生成一个包含所有agent仪表板的HTML文件"""
         # 提取数据
         data, batch_size, time_steps, num_agents = self.extract_rollout_data(rollouts)
         
         # 创建输出目录
         os.makedirs(output_dir, exist_ok=True)
-        
-        # 对第一个批次进行可视化
-        batch_idx = 0
         
         # 创建一个大的图表，包含汇总仪表板和所有agent的详细仪表板
         from plotly import subplots
@@ -368,7 +408,7 @@ class RolloutVisualizer:
         '''
         
         # 保存HTML文件
-        output_path = os.path.join(output_dir, "rollout_visualization.html")
+        output_path = os.path.join(output_dir, html_file_name)
         with open(output_path, 'w', encoding='utf-8') as f:
             f.write(html_content)
         
@@ -397,7 +437,7 @@ def load_rollout(rollout_path):
     
     return rollouts
 
-def visualize_your_rollout(rollouts, output_dir="./rollout_visualizations", show_link=True):
+def visualize_your_rollout(rollouts, output_dir="./rollout_visualizations", batch_idx=0, html_file_name="rollout_visualization.html"):
     """
     可视化rollout数据并提供本地网页映射链接
     
@@ -414,15 +454,15 @@ def visualize_your_rollout(rollouts, output_dir="./rollout_visualizations", show
     visualizer = RolloutVisualizer()
     
     # 执行可视化
-    figures = visualizer.visualize_rollout(rollouts, output_dir)
+    figures = visualizer.visualize_rollout(rollouts, output_dir, batch_idx=batch_idx, html_file_name=html_file_name)
     
     # 只获取生成的HTML链接
     html_links = []
-    html_path = os.path.join(output_dir, "rollout_visualization.html")
+    html_path = os.path.join(output_dir, html_file_name)
     if os.path.exists(html_path):
         file_path = os.path.abspath(html_path)
         link = f'file://{file_path.replace(" ", "%20")}'
-        html_links.append(("rollout_visualization.html", link))
+        html_links.append((html_file_name, link))
     
     
     # 在支持的环境中显示图表
@@ -445,18 +485,22 @@ def visualize_your_rollout(rollouts, output_dir="./rollout_visualizations", show
     return figures, html_links
 
 if __name__ == "__main__":
-    rollout_file_path = "/home/yons/Graduation/rl_occt/outputs/2026-01-05/20-29-28/rollouts/rollout_iter_330_frames_19860000.pt"
     
+    rollout_file_path = "/home/yons/Graduation/rl_occt/outputs/2026-01-07/17-23-58/run-20260107_172401-3hme2r5v5vaaotgr4nk4c/rollouts/rollout_iter_490_frames_29460000.pt"
+    batch_idx = 0
     try:
         print(f"正在加载rollout文件: {rollout_file_path}")
         rollouts = load_rollout(rollout_file_path)
-        
-        output_dir = f"outputs/rollout_vis/rollout_visualizations_{os.path.basename(rollout_file_path).split('.')[0]}"
+        html_file_name=rollout_file_path.split('/')[-1].split('.')[0]+'.html'
+        output_dir = "/".join(rollout_file_path.split('/')[:-1])
         output_dir_abs = os.path.abspath(output_dir)
         # 确保输出目录存在（避免可视化时创建失败）
         os.makedirs(output_dir_abs, exist_ok=True)
         
-        figures, html_links = visualize_your_rollout(rollouts, output_dir=output_dir_abs, show_link=True)
+        figures, html_links = visualize_your_rollout(rollouts, 
+                                                     output_dir=output_dir_abs, 
+                                                     batch_idx=batch_idx, 
+                                                     html_file_name=html_file_name)
         
         print("\n可视化完成！您可以通过以下链接查看结果（Ctrl+左键点击跳转浏览器）：")
         if html_links:
