@@ -1,13 +1,13 @@
 seed: 40
 
 env:
-  max_steps: 800
+  max_steps: 200
   scenario_name: "occt_scenario"
   scenario:
     eval_mode: ??? # automatically fix the map path batch id
-    n_agents: 5
-    task_class: 1
-    is_rand_arc_pos: False
+    n_agents: 3
+    task_class: 0
+    is_rand_arc_pos: True
     init_vel_mean: 0.0
     init_vel_std: 0.0 # useless if is_rand_init_vel is False
     still_space: 10
@@ -21,12 +21,12 @@ env:
     reward_goal: 0
     reward_track_ref_vel: 100        
     reward_track_ref_space: 0
-    reward_track_ref_heading: 50
-    reward_track_ref_path: 60
-    penalty_near_boundary: -0
-    penalty_near_other_agents: -0
+    reward_track_ref_heading: 20
+    reward_track_ref_path: 100
+    penalty_near_boundary: -50
+    penalty_near_other_agents: -50
     penalty_change_steering: -15
-    penalty_change_acc: -0.002
+    penalty_change_acc: -0.008
     threshold_change_steering: 0.015
     threshold_change_acc: 0.05
     penalty_collide_with_agents: -100
@@ -43,7 +43,7 @@ model:
 
 collector:
   frames_per_batch: 60_000 # Frames sampled each sampling iteration
-  n_iters: 0 # Number of sampling/training iterations
+  n_iters: 500 # Number of sampling/training iterations
   total_frames: ???
 
 buffer:
@@ -61,14 +61,14 @@ train:
   lr: 5e-5
   max_grad_norm: 40.0
   device: ???
-  resume_from_checkpoint: /home/yons/Graduation/rl_occt/outputs/2026-01-07/23-45-44/checkpoints/checkpoint_iter_460_frames_27660000.pt # absolute path
+  resume_from_checkpoint: None # absolute path
 eval:
   evaluation_interval: 10
-  evaluation_episodes: 20
+  evaluation_episodes: 200  
 
 logger:
   backend: swanlab # Delete to remove logging
   project_name: occt250105
-  group_name: curve_eval
+  group_name: USA_Intersection_GL_Almighty
   resume_swanlab_id: None # copy from swanlab page
-  mode: local #disabled
+  mode: local
