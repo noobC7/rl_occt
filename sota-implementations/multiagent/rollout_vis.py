@@ -49,7 +49,7 @@ class RolloutVisualizer:
         
         data["action_log_probs"] = rollouts["agents"]["action_log_prob"].cpu().numpy()  # [batch, time, agent]
         
-        info = rollouts["agents"]["info"]
+        info = rollouts["next"]["agents"]["info"]
         data["act_steer"] = info["act_steer"].squeeze(-1).cpu().numpy()  # [batch, time, agent]
         data["act_acc"] = info["act_acc"].squeeze(-1).cpu().numpy()  # [batch, time, agent]
         data["pos"] = info["pos"].cpu().numpy()  # [batch, time, agent, 2]
@@ -71,6 +71,8 @@ class RolloutVisualizer:
         data["reward_track_ref_path"] = info["reward_track_ref_path"].squeeze(-1).cpu().numpy()  # [batch, time, agent]
         data["penalty_change_steering"] = info["penalty_change_steering"].squeeze(-1).cpu().numpy()  # [batch, time, agent]
         data["penalty_change_acc"] = info["penalty_change_acc"].squeeze(-1).cpu().numpy()  # [batch, time, agent]
+        data["penalty_collide_with_agents"] = info["penalty_collide_with_agents"].squeeze(-1).cpu().numpy()  # [batch, time, agent]
+        data["penalty_outside_boundaries"] = info["penalty_outside_boundaries"].squeeze(-1).cpu().numpy()  # [batch, time, agent]
 
         # penalty_collide_with_agents: -100
         # penalty_outside_boundaries: -100
@@ -85,7 +87,8 @@ class RolloutVisualizer:
                             'Distance to Reference[m]','Vel Error[m/s]','Space Error[m]',
                             'Reward Track Ref Vel', 'Reward Track Ref Space', 'Reward Track Ref Heading',
                             'Reward Track Ref Path', 'Penalty Change Steering', 'Penalty Change Acceleration',
-                            'Action Log Probability','Hinge Dis[m]','Hinge Status','Reward Hinge Distance'
+                            'Action Log Probability','Penalty Collide with Agents','Penalty Outside Boundaries',
+                            'Hinge Dis[m]','Hinge Status','Reward Hinge Distance'
                         )
                         if "hinge_dis" in data.keys() else 
                         (
@@ -93,7 +96,7 @@ class RolloutVisualizer:
                             'Distance to Reference[m]','Vel Error[m/s]','Space Error[m]',
                             'Reward Track Ref Vel', 'Reward Track Ref Space', 'Reward Track Ref Heading',
                             'Reward Track Ref Path', 'Penalty Change Steering', 'Penalty Change Acceleration',
-                            'Action Log Probability',
+                            'Action Log Probability','Penalty Collide with Agents','Penalty Outside Boundaries',
                         ) 
                     )
         
@@ -142,14 +145,6 @@ class RolloutVisualizer:
                     legendgroup="distance_ref", showlegend=True),
             row=1, col=5
         )
-        # collision_data = data["is_collision_with_agents"][batch_idx, :valid_time_steps, agent_idx] + \
-        #                  data["is_collision_with_lanelets"][batch_idx, :valid_time_steps, agent_idx]
-        # fig.add_trace(
-        #     go.Scatter(x=time_steps, y=collision_data,
-        #               mode='lines', name='Collisions', line=dict(color=color_list[5]),
-        #               legendgroup="collisions", showlegend=True),
-        #     row=1, col=6
-        # )
         fig.add_trace(
             go.Scatter(x=time_steps, y=data["error_vel"][batch_idx, :valid_time_steps, agent_idx],
                     mode='lines', name='Vel Error', line=dict(color=color_list[5]),
@@ -212,24 +207,39 @@ class RolloutVisualizer:
                     legendgroup="action_log_prob", showlegend=True),
             row=2, col=7
         )
+
+        penalty_collide_with_agents = data["penalty_collide_with_agents"][batch_idx, :valid_time_steps, agent_idx]
+        fig.add_trace(
+            go.Scatter(x=time_steps, y=penalty_collide_with_agents,
+                      mode='lines', name='Penalty Collide with Agents', line=dict(color=color_list[14]),
+                      legendgroup="penalty_collide_with_agents", showlegend=True),
+            row=3, col=1
+        )
+        penalty_outside_boundaries = data["penalty_outside_boundaries"][batch_idx, :valid_time_steps, agent_idx]
+        fig.add_trace(
+            go.Scatter(x=time_steps, y=penalty_outside_boundaries,
+                      mode='lines', name='Penalty Outside Boundaries', line=dict(color=color_list[15]),
+                      legendgroup="penalty_outside_boundaries", showlegend=True),
+            row=3, col=2
+        )
         if "hinge_dis" in data.keys():
             fig.add_trace(
                 go.Scatter(x=time_steps, y=data["hinge_dis"][batch_idx, :valid_time_steps, agent_idx],
-                        mode='lines', name='Hinge Dis', line=dict(color=color_list[14]),
+                        mode='lines', name='Hinge Dis', line=dict(color=color_list[1]),
                         legendgroup="hinge_dis", showlegend=True),
-                row=3, col=1
+                row=3, col=3
             )
             fig.add_trace(
                 go.Scatter(x=time_steps, y=data["hinge_status"][batch_idx, :valid_time_steps, agent_idx],
-                        mode='lines', name='Hinge Status', line=dict(color=color_list[15]),
+                        mode='lines', name='Hinge Status', line=dict(color=color_list[2]),
                         legendgroup="hinge_status", showlegend=True),
-                row=3, col=2
+                row=3, col=4
             )
             fig.add_trace(
                 go.Scatter(x=time_steps, y=data["reward_track_hinge"][batch_idx, :valid_time_steps, agent_idx],
-                        mode='lines', name='Reward Hinge Distance', line=dict(color=color_list[16%len(color_list)]),
+                        mode='lines', name='Reward Hinge Distance', line=dict(color=color_list[3]),
                         legendgroup="reward_hinge_dis", showlegend=True),
-                row=3, col=3
+                row=3, col=5
             )
         fig.update_layout(
             title=f'Agent {agent_idx} Data Analysis (Batch {batch_idx})',
@@ -520,7 +530,7 @@ def visualize_your_rollout(rollouts, output_dir="./rollout_visualizations", batc
 
 if __name__ == "__main__":
     
-    rollout_file_path = "/home/yons/Graduation/rl_occt/outputs/2026-01-14/13-57-53/run-20260114_135756-bnlkvez2dynp2pjwl0dkf/rollouts/rollout_iter_30_frames_1860000.pt"
+    rollout_file_path = "/home/yons/Graduation/rl_occt/outputs/2026-01-14/19-11-29_eval_initial/run-20260114_191134-le0ntfazny0unnqxwpcgd/rollouts/rollout_iter_0_frames_0.pt"
     batch_idx = 1
     try:
         print(f"正在加载rollout文件: {rollout_file_path}")
