@@ -65,6 +65,10 @@ class RolloutVisualizer:
         data["distance_ref"] = info["distance_ref"].squeeze(-1).cpu().numpy()  # [batch, time, agent]
         data["is_collision_with_agents"] = info["is_collision_with_agents"].squeeze(-1).cpu().numpy()  # [batch, time, agent]
         data["is_collision_with_lanelets"] = info["is_collision_with_lanelets"].squeeze(-1).cpu().numpy()  # [batch, time, agent]
+        data["reward_total"] = info["reward_total"].squeeze(-1).cpu().numpy()  # [batch, time, agent]
+        data["reward_progress"] = info["reward_progress"].squeeze(-1).cpu().numpy()  # [batch, time, agent]
+        data["reward_vel"] = info["reward_vel"].squeeze(-1).cpu().numpy()  # [batch, time, agent]
+        data["reward_goal"] = info["reward_goal"].squeeze(-1).cpu().numpy()  # [batch, time, agent]
         data["reward_track_ref_vel"] = info["reward_track_ref_vel"].squeeze(-1).cpu().numpy()  # [batch, time, agent]
         data["reward_track_ref_space"] = info["reward_track_ref_space"].squeeze(-1).cpu().numpy()  # [batch, time, agent]
         data["reward_track_ref_heading"] = info["reward_track_ref_heading"].squeeze(-1).cpu().numpy()  # [batch, time, agent]
@@ -73,37 +77,41 @@ class RolloutVisualizer:
         data["penalty_change_acc"] = info["penalty_change_acc"].squeeze(-1).cpu().numpy()  # [batch, time, agent]
         data["penalty_collide_with_agents"] = info["penalty_collide_with_agents"].squeeze(-1).cpu().numpy()  # [batch, time, agent]
         data["penalty_outside_boundaries"] = info["penalty_outside_boundaries"].squeeze(-1).cpu().numpy()  # [batch, time, agent]
-
+        data["penalty_near_boundary"] = info["penalty_near_boundary"].squeeze(-1).cpu().numpy()  # [batch, time, agent]
+        data["penalty_near_other_agents"] = info["penalty_near_other_agents"].squeeze(-1).cpu().numpy()  # [batch, time, agent]
         # penalty_collide_with_agents: -100
         # penalty_outside_boundaries: -100
         return data, batch_size, time_steps, num_agents
     
     def plot_agent_data(self, data, batch_idx=0, agent_idx=0):
-        
-        fig = make_subplots(rows=3 if "hinge_dis" in data.keys() else 2, cols=7, 
-                    subplot_titles=\
-                        (
-                            'Speed[m/s]','Acceleration[m/s^2]','Heading[degree]', 'Steering Angle[degree]',
-                            'Distance to Reference[m]','Vel Error[m/s]','Space Error[m]',
-                            'Reward Track Ref Vel', 'Reward Track Ref Space', 'Reward Track Ref Heading',
-                            'Reward Track Ref Path', 'Penalty Change Steering', 'Penalty Change Acceleration',
-                            'Action Log Probability','Penalty Collide with Agents','Penalty Outside Boundaries',
-                            'Hinge Dis[m]','Hinge Status','Reward Hinge Distance'
-                        )
-                        if "hinge_dis" in data.keys() else 
-                        (
-                            'Speed[m/s]','Acceleration[m/s^2]','Heading[degree]', 'Steering Angle[degree]',
-                            'Distance to Reference[m]','Vel Error[m/s]','Space Error[m]',
-                            'Reward Track Ref Vel', 'Reward Track Ref Space', 'Reward Track Ref Heading',
-                            'Reward Track Ref Path', 'Penalty Change Steering', 'Penalty Change Acceleration',
-                            'Action Log Probability','Penalty Collide with Agents','Penalty Outside Boundaries',
-                        ) 
-                    )
-        
+        # 重新组织布局：将reward和penalty分别集中显示
+        # Row 1: 状态变量 (6列)
+        # Row 2: Rewards (2列，每列最多4条曲线)
+        # Row 3: Penalties (2列，每列最多4条曲线)
+        # Row 4: Hinge相关 (3列，如果有)
+
+        has_hinge = "hinge_dis" in data.keys()
+        num_rows = 2
+        fix_titles=[
+                'Speed[m/s]', 'Acceleration[m/s^2]', 'Heading[degree]',
+                'Steering Angle[degree]', 'Distance to Reference[m]', 'Space Error[m]',
+                'Rewards Total','Rewards Group 1', 'Rewards Group 2',
+                'Penalties Group 1', 'Penalties Group 2',
+                'Action Log Prob'
+                ]
+        hinge_titles=['Hinge Dis[m]', 'Hinge Status', 'Reward Track Hinge']
+        fig = make_subplots(
+            rows=num_rows, cols=7,
+            subplot_titles=fix_titles+hinge_titles if has_hinge else fix_titles
+        )
+
         valid_time_steps = data["valid_time_steps"][batch_idx]
         time_steps = data["time_step"][:valid_time_steps]
 
         color_list=["blue","purple","green","orange","brown","red","black","cyan","magenta","gray","olive","pink","teal","navy","salmon","turquoise"]
+
+        # ============ Row 1: 状态变量 ============
+        # Speed, Ref Vel, Vel Error
         fig.add_trace(
             go.Scatter(x=time_steps, y=data["vel_magnitude"][batch_idx, :valid_time_steps, agent_idx],
                     mode='lines', name='Speed', line=dict(color=color_list[0]),
@@ -116,15 +124,22 @@ class RolloutVisualizer:
                     legendgroup="ref_vel", showlegend=True),
             row=1, col=1
         )
-        
-        
+        fig.add_trace(
+            go.Scatter(x=time_steps, y=data["error_vel"][batch_idx, :valid_time_steps, agent_idx],
+                    mode='lines', name='Vel Error', line=dict(color=color_list[5]),
+                    legendgroup="vel_error", showlegend=True),
+            row=1, col=1
+        )
+
+        # Acceleration
         fig.add_trace(
             go.Scatter(x=time_steps, y=data["act_acc"][batch_idx, :valid_time_steps, agent_idx],
                     mode='lines', name='Acceleration', line=dict(color=color_list[1]),
                     legendgroup="acceleration", showlegend=True),
             row=1, col=2
         )
-        
+
+        # Heading
         fig.add_trace(
             go.Scatter(x=time_steps, y=data["rot"][batch_idx, :valid_time_steps, agent_idx]/np.pi*180,
                     mode='lines', name='Heading', line=dict(color=color_list[2]),
@@ -132,122 +147,167 @@ class RolloutVisualizer:
             row=1, col=3
         )
 
+        # Steering Angle
         fig.add_trace(
             go.Scatter(x=time_steps, y=data["act_steer"][batch_idx, :valid_time_steps, agent_idx]/np.pi*180,
                     mode='lines', name='Steering Angle', line=dict(color=color_list[3]),
                     legendgroup="steering_angle", showlegend=True),
             row=1, col=4
         )
-        
+
+        # Distance to Reference
         fig.add_trace(
             go.Scatter(x=time_steps, y=data["distance_ref"][batch_idx, :valid_time_steps, agent_idx],
                     mode='lines', name='Distance to Reference', line=dict(color=color_list[4]),
                     legendgroup="distance_ref", showlegend=True),
             row=1, col=5
         )
-        fig.add_trace(
-            go.Scatter(x=time_steps, y=data["error_vel"][batch_idx, :valid_time_steps, agent_idx],
-                    mode='lines', name='Vel Error', line=dict(color=color_list[5]),
-                    legendgroup="vel_error", showlegend=True),
-            row=1, col=6
-        )
+
+        # Space Error (Front & Back)
         fig.add_trace(
             go.Scatter(x=time_steps, y=data["error_space"][batch_idx, :valid_time_steps, agent_idx,0],
                     mode='lines', name='Space Front', line=dict(color=color_list[6]),
                     legendgroup="space_front", showlegend=True),
-            row=1, col=7
+            row=1, col=6
         )
         fig.add_trace(
             go.Scatter(x=time_steps, y=data["error_space"][batch_idx, :valid_time_steps, agent_idx,1],
                     mode='lines', name='Space Back', line=dict(color=color_list[7]),
                     legendgroup="space_back", showlegend=True),
+            row=1, col=6
+        )
+
+        # ============ Row 2: Rewards ============
+        # Rewards Group 1: Total, Progress, Vel, Goal (在同一图中)
+        fig.add_trace(
+            go.Scatter(x=time_steps, y=data["reward_total"][batch_idx, :valid_time_steps, agent_idx],
+                    mode='lines', name='Reward Total', line=dict(color=color_list[0]),
+                    legendgroup="reward_total", showlegend=True),
             row=1, col=7
         )
-        
         fig.add_trace(
-            go.Scatter(x=time_steps, y=data["reward_track_ref_vel"][batch_idx, :valid_time_steps, agent_idx],
-                    mode='lines', name='Reward Track Ref Vel', line=dict(color=color_list[7]),
-                    legendgroup="reward_track_ref_vel", showlegend=True),
+            go.Scatter(x=time_steps, y=data["reward_progress"][batch_idx, :valid_time_steps, agent_idx],
+                    mode='lines', name='Reward Progress', line=dict(color=color_list[1]),
+                    legendgroup="reward_progress", showlegend=True),
             row=2, col=1
         )
         fig.add_trace(
+            go.Scatter(x=time_steps, y=data["reward_vel"][batch_idx, :valid_time_steps, agent_idx],
+                    mode='lines', name='Reward Vel', line=dict(color=color_list[2]),
+                    legendgroup="reward_vel", showlegend=True),
+            row=2, col=1
+        )
+        fig.add_trace(
+            go.Scatter(x=time_steps, y=data["reward_goal"][batch_idx, :valid_time_steps, agent_idx],
+                    mode='lines', name='Reward Goal', line=dict(color=color_list[3]),
+                    legendgroup="reward_goal", showlegend=True),
+            row=2, col=1
+        )
+        # Rewards Group 2: Track Ref Vel, Space, Heading, Path (在同一图中)
+        fig.add_trace(
+            go.Scatter(x=time_steps, y=data["reward_track_ref_vel"][batch_idx, :valid_time_steps, agent_idx],
+                    mode='lines', name='Reward Track Ref Vel', line=dict(color=color_list[4]),
+                    legendgroup="reward_track_ref_vel", showlegend=True),
+            row=2, col=1
+        )
+
+        if has_hinge:
+            fig.add_trace(
+                go.Scatter(x=time_steps, y=data["reward_track_hinge"][batch_idx, :valid_time_steps, agent_idx],
+                        mode='lines', name='Reward Track Hinge', line=dict(color=color_list[2]),
+                        legendgroup="reward_track_hinge", showlegend=True),
+                row=2, col=2
+            )
+        fig.add_trace(
             go.Scatter(x=time_steps, y=data["reward_track_ref_space"][batch_idx, :valid_time_steps, agent_idx],
-                    mode='lines', name='Reward Track Ref Space', line=dict(color=color_list[8]),
+                    mode='lines', name='Reward Track Ref Space', line=dict(color=color_list[5]),
                     legendgroup="reward_track_ref_space", showlegend=True),
             row=2, col=2
         )
         fig.add_trace(
             go.Scatter(x=time_steps, y=data["reward_track_ref_heading"][batch_idx, :valid_time_steps, agent_idx],
-                    mode='lines', name='Reward Track Ref Heading', line=dict(color=color_list[9]),
+                    mode='lines', name='Reward Track Ref Heading', line=dict(color=color_list[6]),
                     legendgroup="reward_track_ref_heading", showlegend=True),
-            row=2, col=3
+            row=2, col=2
         )
         fig.add_trace(
             go.Scatter(x=time_steps, y=data["reward_track_ref_path"][batch_idx, :valid_time_steps, agent_idx],
-                    mode='lines', name='Reward Track Ref Path', line=dict(color=color_list[10]),
+                    mode='lines', name='Reward Track Ref Path', line=dict(color=color_list[7]),
                     legendgroup="reward_track_ref_path", showlegend=True),
-            row=2, col=4
+            row=2, col=2
         )
+
+        # ============ Row 3: Penalties ============
+        # Penalties Group 1: Change Steering, Change Acc, Action Log Prob (在同一图中)
         fig.add_trace(
             go.Scatter(x=time_steps, y=data["penalty_change_steering"][batch_idx, :valid_time_steps, agent_idx],
-                    mode='lines', name='Penalty Change Steering', line=dict(color=color_list[11]),
+                    mode='lines', name='Penalty Change Steering', line=dict(color=color_list[8]),
                     legendgroup="penalty_change_steering", showlegend=True),
-            row=2, col=5
+            row=2, col=3
         )
         fig.add_trace(
             go.Scatter(x=time_steps, y=data["penalty_change_acc"][batch_idx, :valid_time_steps, agent_idx],
-                    mode='lines', name='Penalty Change Acceleration', line=dict(color=color_list[12]),
+                    mode='lines', name='Penalty Change Acc', line=dict(color=color_list[9]),
                     legendgroup="penalty_change_acc", showlegend=True),
-            row=2, col=6
-        )
-        
-        fig.add_trace(
-            go.Scatter(x=time_steps, y=data["action_log_probs"][batch_idx, :valid_time_steps, agent_idx],
-                    mode='lines', name='Action Log Prob', line=dict(color=color_list[13]),
-                    legendgroup="action_log_prob", showlegend=True),
-            row=2, col=7
+            row=2, col=3
         )
 
-        penalty_collide_with_agents = data["penalty_collide_with_agents"][batch_idx, :valid_time_steps, agent_idx]
+        # Penalties Group 2: Collide with Agents, Outside Boundaries, Near Boundary, Near Other Agents (在同一图中)
         fig.add_trace(
-            go.Scatter(x=time_steps, y=penalty_collide_with_agents,
-                      mode='lines', name='Penalty Collide with Agents', line=dict(color=color_list[14]),
-                      legendgroup="penalty_collide_with_agents", showlegend=True),
-            row=3, col=1
+            go.Scatter(x=time_steps, y=data["penalty_collide_with_agents"][batch_idx, :valid_time_steps, agent_idx],
+                    mode='lines', name='Penalty Collide with Agents', line=dict(color=color_list[11]),
+                    legendgroup="penalty_collide_with_agents", showlegend=True),
+            row=2, col=4
         )
-        penalty_outside_boundaries = data["penalty_outside_boundaries"][batch_idx, :valid_time_steps, agent_idx]
         fig.add_trace(
-            go.Scatter(x=time_steps, y=penalty_outside_boundaries,
-                      mode='lines', name='Penalty Outside Boundaries', line=dict(color=color_list[15]),
-                      legendgroup="penalty_outside_boundaries", showlegend=True),
-            row=3, col=2
+            go.Scatter(x=time_steps, y=data["penalty_outside_boundaries"][batch_idx, :valid_time_steps, agent_idx],
+                    mode='lines', name='Penalty Outside Boundaries', line=dict(color=color_list[12]),
+                    legendgroup="penalty_outside_boundaries", showlegend=True),
+            row=2, col=4
         )
-        if "hinge_dis" in data.keys():
+        fig.add_trace(
+            go.Scatter(x=time_steps, y=data["penalty_near_boundary"][batch_idx, :valid_time_steps, agent_idx],
+                    mode='lines', name='Penalty Near Boundary', line=dict(color=color_list[13]),
+                    legendgroup="penalty_near_boundary", showlegend=True),
+            row=2, col=4
+        )
+        fig.add_trace(
+            go.Scatter(x=time_steps, y=data["penalty_near_other_agents"][batch_idx, :valid_time_steps, agent_idx],
+                    mode='lines', name='Penalty Near Other Agents', line=dict(color=color_list[14]),
+                    legendgroup="penalty_near_other_agents", showlegend=True),
+            row=2, col=4
+        )
+
+        fig.add_trace(
+            go.Scatter(x=time_steps, y=data["action_log_probs"][batch_idx, :valid_time_steps, agent_idx],
+                    mode='lines', name='Action Log Prob', line=dict(color=color_list[10]),
+                    legendgroup="action_log_prob", showlegend=True),
+            row=2, col=5
+        )
+        # ============ Row 4: Hinge相关 (如果有) ============
+        if has_hinge:
+            # Hinge Dis
             fig.add_trace(
                 go.Scatter(x=time_steps, y=data["hinge_dis"][batch_idx, :valid_time_steps, agent_idx],
-                        mode='lines', name='Hinge Dis', line=dict(color=color_list[1]),
+                        mode='lines', name='Hinge Dis', line=dict(color=color_list[0]),
                         legendgroup="hinge_dis", showlegend=True),
-                row=3, col=3
+                row=2, col=6
             )
+            # Hinge Status
             fig.add_trace(
                 go.Scatter(x=time_steps, y=data["hinge_status"][batch_idx, :valid_time_steps, agent_idx],
-                        mode='lines', name='Hinge Status', line=dict(color=color_list[2]),
+                        mode='lines', name='Hinge Status', line=dict(color=color_list[1]),
                         legendgroup="hinge_status", showlegend=True),
-                row=3, col=4
+                row=2, col=7
             )
-            fig.add_trace(
-                go.Scatter(x=time_steps, y=data["reward_track_hinge"][batch_idx, :valid_time_steps, agent_idx],
-                        mode='lines', name='Reward Hinge Distance', line=dict(color=color_list[3]),
-                        legendgroup="reward_hinge_dis", showlegend=True),
-                row=3, col=5
-            )
+
         fig.update_layout(
             title=f'Agent {agent_idx} Data Analysis (Batch {batch_idx})',
-            height=800,  # 调整高度以适应2x4布局
-            width=2200,  # 增加宽度以适应2x4布局
+            height=400 * num_rows,  # 根据行数调整高度
+            width=2200,
             hovermode='x unified'
         )
-    
+
         return fig
     def create_summary_dashboard(self, data, batch_idx=0):
         """创建汇总仪表板（4个独立图表，每个图表图例在右上方）"""
@@ -530,8 +590,8 @@ def visualize_your_rollout(rollouts, output_dir="./rollout_visualizations", batc
 
 if __name__ == "__main__":
     
-    rollout_file_path = "/home/yons/Graduation/rl_occt/outputs/2026-01-14/19-11-29_eval_initial/run-20260114_191134-le0ntfazny0unnqxwpcgd/rollouts/rollout_iter_0_frames_0.pt"
-    batch_idx = 1
+    rollout_file_path = "/home/yons/Graduation/rl_occt/outputs/2026-01-16/15-58-02/run-20260116_155804-hid8z7kc1qe8i0rt6fzr2/rollouts/rollout_iter_40_frames_2460000.pt"
+    batch_idx = 0
     try:
         print(f"正在加载rollout文件: {rollout_file_path}")
         rollouts = load_rollout(rollout_file_path)
