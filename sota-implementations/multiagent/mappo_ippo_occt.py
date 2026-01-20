@@ -404,7 +404,7 @@ def train(cfg: DictConfig):  # noqa: F821
                 log_evaluation(logger, rollouts, env_test, evaluation_time, 
                                step=i, video_caption=f"path{eval_path_idx}")
                 save_checkpoint(logger, policy, value_module, optim, i, total_frames)
-                #save_rollout(logger, rollouts, i, total_frames, suffix=f"=path{eval_path_idx}")
+                save_rollout(logger, rollouts, i, total_frames, suffix=f"_path{eval_path_idx}")
 
         if cfg.logger.backend == "wandb":
             logger.experiment.log({}, commit=True)
