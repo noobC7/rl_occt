@@ -63,6 +63,7 @@ class RolloutVisualizer:
         data["ref_vel"] = info["ref_vel"].squeeze(-1).cpu().numpy()  # [batch, time, agent]
         data["rot"] = info["rot"].squeeze(-1).cpu().numpy()  # [batch, time, agent]
         data["distance_ref"] = info["distance_ref"].squeeze(-1).cpu().numpy()  # [batch, time, agent]
+        data["distance_lookahead_pts"] = info["distance_lookahead_pts"].squeeze(-1).cpu().numpy()  # [batch, time, agent]
         data["is_collision_with_agents"] = info["is_collision_with_agents"].squeeze(-1).cpu().numpy()  # [batch, time, agent]
         data["is_collision_with_lanelets"] = info["is_collision_with_lanelets"].squeeze(-1).cpu().numpy()  # [batch, time, agent]
         data["reward_total"] = info["reward_total"].squeeze(-1).cpu().numpy()  # [batch, time, agent]
@@ -160,6 +161,12 @@ class RolloutVisualizer:
             go.Scatter(x=time_steps, y=data["distance_ref"][batch_idx, :valid_time_steps, agent_idx],
                     mode='lines', name='Distance to Reference', line=dict(color=color_list[4]),
                     legendgroup="distance_ref", showlegend=True),
+            row=1, col=5
+        )
+        fig.add_trace(
+            go.Scatter(x=time_steps, y=data["distance_lookahead_pts"][batch_idx, :valid_time_steps, agent_idx],
+                    mode='lines', name='Distance to Lookahead Pts', line=dict(color=color_list[12]),
+                    legendgroup="distance_lookahead_pts", showlegend=True),
             row=1, col=5
         )
 
@@ -590,7 +597,7 @@ def visualize_your_rollout(rollouts, output_dir="./rollout_visualizations", batc
 
 if __name__ == "__main__":
     
-    rollout_file_path = "/home/yons/Graduation/rl_occt/outputs/2026-01-16/15-58-02/run-20260116_155804-hid8z7kc1qe8i0rt6fzr2/rollouts/rollout_iter_40_frames_2460000.pt"
+    rollout_file_path = "/home/yons/Graduation/rl_occt/outputs/2026-01-21/21-27-16/run-20260121_212718-kxfialxhgybhdimpx5o2w/rollouts/rollout_iter_10_frames_660000_path0.pt"
     batch_idx = 0
     try:
         print(f"正在加载rollout文件: {rollout_file_path}")
