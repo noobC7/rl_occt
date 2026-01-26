@@ -11,7 +11,7 @@ env:
     init_vel_mean: 3.0
     init_vel_std: 0.0 # useless if is_rand_init_vel is False
     still_space: 10
-    init_arc_pos: 5.0 # useless if is_rand_arc_pos is False
+    init_arc_pos: 30.0 # useless if is_rand_arc_pos is False
     use_center_frenet_ref: True # True means use continuous frenet reference, False means use discrete reference
     mask_ref_v: True
     n_nearing_agents_observed: 2
@@ -19,14 +19,14 @@ env:
     reward_progress: 10.0
     reward_vel: 0
     reward_goal: 0
-    reward_track_ref_vel: 0        
+    reward_track_ref_vel: 50       
     reward_track_ref_space: 50
     reward_track_hinge: 0
-    reward_track_ref_heading: 0
-    reward_track_ref_path: 60
-    penalty_near_boundary: -50
+    reward_track_ref_heading: 20
+    reward_track_ref_path: 100
+    penalty_near_boundary: -100
     penalty_near_other_agents: -100
-    # penalty_change_steering: -25
+    # penalty_change_steering: -50
     # penalty_change_acc: -0.008
     penalty_change_steering: -0.0
     penalty_change_acc: -0.0
@@ -64,10 +64,10 @@ train:
   lr: 5e-5
   max_grad_norm: 40.0
   device: ???
-  resume_from_checkpoint: /home/yons/Graduation/rl_occt/outputs/2026-01-16/15-16-45/checkpoints/checkpoint_iter_40_frames_2460000.pt # absolute path
+  resume_from_checkpoint: /home/yons/Graduation/rl_occt/outputs/2026-01-21/22-47-45/checkpoints/checkpoint_iter_490_frames_29460000.pt # absolute path
 eval:
   evaluation_interval: 10
-  evaluation_episodes: 1
+  evaluation_episodes: 15
 
 logger:
   backend: swanlab # Delete to remove logging
