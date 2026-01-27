@@ -87,6 +87,12 @@ def log_training(
     episode_reward = sampling_td.get(("next", "agents", "episode_reward")).mean(-2)[
         done
     ]
+    
+    done_squeezed = done.squeeze(-1)  # [300, 200]
+    episode_lengths = done_squeezed.float().argmax(dim=1) + 1  # [300]
+    all_false = done_squeezed.sum(dim=1) == 0
+    episode_lengths[all_false] = done.shape[1]  # 设为最大步长 200
+
     metrics_to_log.update(
         {
             "train/reward/reward_min": reward.min().item(),
@@ -102,6 +108,9 @@ def log_training(
             "train/training_iteration": iteration,
             "train/current_frames": current_frames,
             "train/total_frames": total_frames,
+            "train/episode_length/min": episode_lengths.float().min().item(),
+            "train/episode_length/mean": episode_lengths.float().mean().item(),
+            "train/episode_length/max": episode_lengths.float().max().item(),
         }
     )
     if isinstance(logger, WandbLogger):
