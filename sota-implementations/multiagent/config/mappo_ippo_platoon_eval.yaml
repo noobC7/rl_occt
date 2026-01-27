@@ -9,9 +9,9 @@ env:
     eval_mode: ??? # automatically fix the map path batch id
     n_agents: 4
     task_class: 0
-    is_rand_arc_pos: True
-    init_vel_mean: 3.0
-    init_vel_std: 1.0 # useless if is_rand_init_vel is False
+    is_rand_arc_pos: False
+    init_vel_mean: 0.0
+    init_vel_std: 0.0 # useless if is_rand_init_vel is False
     still_space: 10
     init_arc_pos: 5.0 # useless if is_rand_arc_pos is False
     use_center_frenet_ref: True # True means use continuous frenet reference, False means use discrete reference
@@ -20,8 +20,8 @@ env:
     reward_progress: 0.0
     reward_vel: 0
     reward_goal: 0
-    reward_track_ref_vel: 50       
-    reward_track_ref_space: 50
+    reward_track_ref_vel: 100        
+    reward_track_ref_space: 0
     reward_track_ref_heading: 20
     reward_track_ref_path: 100
     penalty_near_boundary: -50
@@ -42,7 +42,7 @@ model:
 
 collector:
   frames_per_batch: 60_000 # Frames sampled each sampling iteration
-  n_iters: 500 # Number of sampling/training iterations
+  n_iters: 0 # Number of sampling/training iterations
   total_frames: ???
 
 buffer:
@@ -60,11 +60,11 @@ train:
   lr: 5e-5
   max_grad_norm: 40.0
   device: ???
-  resume_from_checkpoint: None # absolute path
+  resume_from_checkpoint: /home/yons/Graduation/rl_occt/outputs/2026-01-27/17-19-11/checkpoints/checkpoint_iter_90_frames_5460000.pt # absolute path
 
 eval:
   evaluation_interval: 10
-  evaluation_episodes: 200
+  evaluation_episodes: 17
 
 logger:
   backend: swanlab # Delete to remove logging

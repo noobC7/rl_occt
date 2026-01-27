@@ -4,6 +4,8 @@ env:
   max_steps: 200
   scenario_name: "occt_scenario"
   scenario:
+    viewer_zoom: 17.0
+    resolution_factor: 2
     eval_mode: ??? # automatically fix the map path batch id
     n_agents: 4
     task_class: 1
