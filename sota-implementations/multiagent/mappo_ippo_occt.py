@@ -34,12 +34,12 @@ def rendering_batch_callback(env, td):
     for env_index in range(env.num_envs):
         env.frames[env_index].append(env.render(mode="rgb_array", agent_index_focus=round(env.scenario.n_agents/2)-1, env_index=env_index)) 
 
-@hydra.main(version_base="1.1", config_path="config", config_name="mappo_ippo_occt_eval")
+@hydra.main(version_base="1.1", config_path="config", config_name="mappo_ippo_platoon")
 def train(cfg: DictConfig):  # noqa: F821
     # Device
     cfg.train.device = "cpu" if not torch.cuda.device_count() else "cuda:0"
     cfg.env.device = cfg.train.device
-
+    cfg.env.max_steps = eval(cfg.env.max_steps)
     # Seeding
     torch.manual_seed(cfg.seed)
     # 检查是否需要从检查点恢复
@@ -47,7 +47,6 @@ def train(cfg: DictConfig):  # noqa: F821
     start_iteration = 0
     start_frames = 0
     # Sampling
-    cfg.env.vmas_envs = cfg.collector.frames_per_batch // cfg.env.max_steps
     cfg.collector.total_frames = cfg.collector.frames_per_batch * cfg.collector.n_iters
     cfg.buffer.memory_size = cfg.collector.frames_per_batch
     cfg.env.scenario.eval_mode = False
@@ -74,7 +73,7 @@ def train(cfg: DictConfig):  # noqa: F821
         scenario=cfg.env.scenario_name,
         num_envs=cfg.eval.evaluation_episodes,
         continuous_actions=True,
-        max_steps=cfg.env.max_steps,
+        max_steps=cfg.env.eval_max_steps,
         device=cfg.env.device,
         seed=cfg.seed,
         # Scenario kwargs
@@ -202,7 +201,7 @@ def train(cfg: DictConfig):  # noqa: F821
         with torch.no_grad(), set_exploration_type(ExplorationType.DETERMINISTIC):
             env_test.frames = [[] for _ in range(env_test.num_envs)]
             rollouts = env_test.rollout(
-                max_steps=cfg.env.max_steps,
+                max_steps=cfg.env.eval_max_steps,
                 policy=policy,
                 callback=rendering_batch_callback,
                 auto_cast_to_device=True,
@@ -302,7 +301,7 @@ def train(cfg: DictConfig):  # noqa: F821
             with torch.no_grad(), set_exploration_type(ExplorationType.DETERMINISTIC):
                 env_test.frames = []
                 rollouts = env_test.rollout(
-                    max_steps=cfg.env.max_steps,
+                    max_steps=cfg.env.eval_max_steps,
                     policy=policy,
                     callback=rendering_callback,
                     auto_cast_to_device=True,
