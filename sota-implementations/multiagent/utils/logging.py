@@ -20,7 +20,7 @@ def init_logging(cfg, model_name: str):
     logger = get_logger(
         logger_type=cfg.logger.backend,
         logger_name=os.getcwd(),
-        experiment_name=generate_exp_name(cfg.env.scenario_name, model_name),
+        experiment_name=generate_exp_name(model_name, cfg.logger.group_name),
         wandb_kwargs={
             "group": cfg.logger.group_name or model_name,
             "project": cfg.logger.project_name
@@ -87,12 +87,6 @@ def log_training(
     episode_reward = sampling_td.get(("next", "agents", "episode_reward")).mean(-2)[
         done
     ]
-    
-    done_squeezed = done.squeeze(-1)  # [300, 200]
-    episode_lengths = done_squeezed.float().argmax(dim=1) + 1  # [300]
-    all_false = done_squeezed.sum(dim=1) == 0
-    episode_lengths[all_false] = done.shape[1]  # 设为最大步长 200
-
     metrics_to_log.update(
         {
             "train/reward/reward_min": reward.min().item(),
@@ -108,11 +102,26 @@ def log_training(
             "train/training_iteration": iteration,
             "train/current_frames": current_frames,
             "train/total_frames": total_frames,
-            "train/episode_length/min": episode_lengths.float().min().item(),
-            "train/episode_length/mean": episode_lengths.float().mean().item(),
-            "train/episode_length/max": episode_lengths.float().max().item(),
         }
     )
+    try:
+        env_total_step = sampling_td.get(("agents", "info", "env_total_step"))[:, -1, 0, 0]
+        road_total_step = sampling_td.get(("agents", "info", "road_total_step"))[0, -1, 0, :]
+        metrics_to_log.update({
+            "train/road_total_step_mean": road_total_step.float().mean().item(),
+            "train/env_total_step_mean": env_total_step.float().mean().item(),
+        })
+        for i in range(road_total_step.shape[0]):
+            metrics_to_log.update({
+                f"train/road_{i}_total_step": road_total_step.float()[i].item(),
+            })
+        print(f"Total road steps per env: {road_total_step.tolist()}")
+
+    except (KeyError, AttributeError) as e:
+        # 如果 info 中没有 max_episode_step_reached 字段，跳过这个统计
+        print(f"Warning: Could not extract max_episode_step_reached from info: {e}")
+        pass
+
     if isinstance(logger, WandbLogger):
         logger.experiment.log(metrics_to_log, commit=False)
     else:
@@ -136,11 +145,12 @@ def log_evaluation(
             tuple(range(r.batch_dims, r.get(("next", "done")).ndim)),
             dtype=torch.bool,
         )
+        next_done = next_done.clone()  # 必须clone，否则会修改原rollouts中的数据
+        next_done[-1] = True  # 将最后一个位置设为True
         done_index = next_done.nonzero(as_tuple=True)[0][
             0
         ]  # First done index for this traj
         rollouts[k] = r[: done_index + 1]
-
     rewards = [td.get(("next", "agents", "reward")).sum(0).mean() for td in rollouts]
     metrics_to_log = {
         "eval/episode_reward_min": min(rewards),
@@ -187,6 +197,8 @@ def log_batch_video(
             tuple(range(r.batch_dims, r.get(("next", "done")).ndim)),
             dtype=torch.bool,
         )
+        next_done = next_done.clone()  # 必须clone，否则会修改原rollouts中的数据
+        next_done[-1] = True  # 将最后一个位置设为True
         done_index = next_done.nonzero(as_tuple=True)[0][
             0
         ]  # First done index for this traj
