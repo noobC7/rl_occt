@@ -1,17 +1,12 @@
-# Copyright (c) Meta Platforms, Inc. and affiliates.
-#
-# This source code is licensed under the MIT license found in the
-# LICENSE file in the root directory of this source tree.
-from __future__ import annotations
-
 import time
 import os
 import hydra
 import torch
+from omegaconf import DictConfig
+from torch import nn
 from tqdm import tqdm
 from tensordict.nn import TensorDictModule
 from tensordict.nn.distributions import NormalParamExtractor
-from torch import nn
 from torchrl._utils import logger as torchrl_logger
 from torchrl.collectors import SyncDataCollector
 from torchrl.data import TensorDictReplayBuffer
@@ -24,9 +19,7 @@ from torchrl.modules import ProbabilisticActor, TanhNormal, ValueOperator
 from torchrl.modules.models.multiagent import MultiAgentMLP,GroupSharedMLP
 from torchrl.objectives import ClipPPOLoss, ValueEstimators
 from utils.logging import init_logging, log_evaluation, log_training, log_batch_video
-from utils.utils import DoneTransform
-from omegaconf import DictConfig
-from utils.utils import save_checkpoint, save_rollout, load_checkpoint
+from utils.utils import DoneTransform, save_checkpoint, save_rollout, load_checkpoint
 def rendering_callback(env, td):
     env.frames.append(env.render(mode="rgb_array", agent_index_focus=round(env.scenario.n_agents/2)-1)) 
 
@@ -35,14 +28,12 @@ def rendering_batch_callback(env, td):
         env.frames[env_index].append(env.render(mode="rgb_array", agent_index_focus=round(env.scenario.n_agents/2)-1, env_index=env_index)) 
 
 @hydra.main(version_base="1.1", config_path="config", config_name="mappo_ippo_platoon")
-def train(cfg: DictConfig):  # noqa: F821
+def train(cfg: DictConfig):
     # Device
     cfg.train.device = "cpu" if not torch.cuda.device_count() else "cuda:0"
     cfg.env.device = cfg.train.device
     cfg.env.max_steps = eval(cfg.env.max_steps)
-    # Seeding
     torch.manual_seed(cfg.seed)
-    # 检查是否需要从检查点恢复
     resume_from_checkpoint = cfg.train.resume_from_checkpoint
     start_iteration = 0
     start_frames = 0
@@ -58,10 +49,8 @@ def train(cfg: DictConfig):  # noqa: F821
         max_steps=cfg.env.max_steps,
         device=cfg.env.device,
         seed=cfg.seed,
-        # Scenario kwargs
         **cfg.env.scenario,
     )
-    
     env = TransformedEnv(
         env,
         RewardSum(in_keys=[env.reward_key], out_keys=[("agents", "episode_reward")]),
@@ -76,7 +65,6 @@ def train(cfg: DictConfig):  # noqa: F821
         max_steps=cfg.env.eval_max_steps,
         device=cfg.env.device,
         seed=cfg.seed,
-        # Scenario kwargs
         **cfg.env.scenario,
     )
 
@@ -157,7 +145,7 @@ def train(cfg: DictConfig):  # noqa: F821
         critic_network=value_module,
         clip_epsilon=cfg.loss.clip_epsilon,
         entropy_coef=cfg.loss.entropy_eps,
-        normalize_advantage=False,
+        normalize_advantage=True,
     )
     loss_module.set_keys(
         reward=env.reward_key,
@@ -183,7 +171,6 @@ def train(cfg: DictConfig):  # noqa: F821
             f"Checkpoint path {resume_from_checkpoint} does not exist. "
             "Training from scratch."
         )
-
     # Logging
     if cfg.logger.backend:
         model_name = (
@@ -224,15 +211,13 @@ def train(cfg: DictConfig):  # noqa: F821
         return
     
     sampling_start = time.time()
-    total_iters = cfg.collector.n_iters
     pbar = tqdm(enumerate(collector, start=start_iteration), 
              initial=start_iteration,
-             total=total_iters, 
+             total=cfg.collector.n_iters, 
              desc="Training", 
              unit="iter")
     for i, tensordict_data in pbar:
         sampling_time = time.time() - sampling_start
-
         with torch.no_grad():
             loss_module.value_estimator(
                 tensordict_data,
@@ -310,14 +295,11 @@ def train(cfg: DictConfig):  # noqa: F821
                 )
                 eval_path_idx = int(env_test.scenario.road.batch_id[0].cpu().numpy())
                 evaluation_time = time.time() - evaluation_start
-
                 log_evaluation(logger, rollouts, env_test, evaluation_time, 
                                step=i, video_caption=f"path{eval_path_idx}")
                 save_checkpoint(logger, policy, value_module, optim, i, total_frames)
-                save_rollout(logger, rollouts, i, total_frames, suffix=f"_path{eval_path_idx}")
+                #save_rollout(logger, rollouts, i, total_frames, suffix=f"_path{eval_path_idx}")
 
-        if cfg.logger.backend == "wandb":
-            logger.experiment.log({}, commit=True)
         sampling_start = time.time()
     collector.shutdown()
     if not env.is_closed:
