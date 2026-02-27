@@ -25,9 +25,10 @@ def rendering_callback(env, td):
 
 def rendering_batch_callback(env, td):
     for env_index in range(env.num_envs):
-        env.frames[env_index].append(env.render(mode="rgb_array", agent_index_focus=round(env.scenario.n_agents/2)-1, env_index=env_index)) 
+        #env.frames[env_index].append(env.render(mode="rgb_array", agent_index_focus=round(env.scenario.n_agents/2)-1, env_index=env_index)) 
+        env.frames[env_index].append(env.render(mode="rgb_array", agent_index_focus=0, env_index=env_index)) 
 
-@hydra.main(version_base="1.1", config_path="config", config_name="mappo_ippo_platoon")
+@hydra.main(version_base="1.1", config_path="config", config_name="mappo_platoon_wo_cp")
 def train(cfg: DictConfig):
     # Device
     cfg.train.device = "cpu" if not torch.cuda.device_count() else "cuda:0"
@@ -40,7 +41,6 @@ def train(cfg: DictConfig):
     # Sampling
     cfg.collector.total_frames = cfg.collector.frames_per_batch * cfg.collector.n_iters
     cfg.buffer.memory_size = cfg.collector.frames_per_batch
-    cfg.env.scenario.eval_mode = False
     # Create env and env_test
     env = VmasEnv(
         scenario=cfg.env.scenario_name,
@@ -55,9 +55,6 @@ def train(cfg: DictConfig):
         env,
         RewardSum(in_keys=[env.reward_key], out_keys=[("agents", "episode_reward")]),
     )
-    if cfg.collector.n_iters == 0:
-        # only evaluation, fix the map path batch id
-        cfg.env.scenario.eval_mode = True 
     env_test = VmasEnv(
         scenario=cfg.env.scenario_name,
         num_envs=cfg.eval.evaluation_episodes,
@@ -82,7 +79,7 @@ def train(cfg: DictConfig):
             centralised=False,
             share_params=share_params,
             device=cfg.train.device,
-            depth=2,
+            depth=3,
             num_cells=256,
             activation_class=nn.Tanh,
         ),
@@ -279,7 +276,7 @@ def train(cfg: DictConfig):
 
         if (
             cfg.eval.evaluation_episodes > 0
-            and i % cfg.eval.evaluation_interval == 0
+            and (i % cfg.eval.evaluation_interval == 0 or i == cfg.collector.n_iters - 1)
             and cfg.logger.backend
         ):
             evaluation_start = time.time()
