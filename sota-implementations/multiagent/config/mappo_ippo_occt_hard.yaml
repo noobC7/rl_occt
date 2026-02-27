@@ -7,19 +7,18 @@ env:
     n_agents: 3
     task_class: 0
     is_rand_init_vel: True
-    is_rand_arc_pos: True
-    init_vel: 0.0
+    is_rand_arc_pos: False
+    init_vel_mean: 3.0
+    init_vel_std: 1.0
     init_arc_pos: 5.0
-    platoon_vel_mean: 3.0
-    platoon_vel_var: 1.0
     use_frenet_ref: True
     is_observe_distance_to_boundaries: False # False means observe future left and right boundaries
     # reward weights
     reward_progress: 0.0
     reward_vel: 0
     reward_goal: 0
-    reward_track_ref_vel: 10        
-    reward_track_ref_space: 0
+    reward_track_ref_vel: 0        
+    reward_track_ref_space: 10
     reward_track_ref_path: 20
     penalty_near_boundary: -0
     penalty_near_other_agents: -0
@@ -65,7 +64,6 @@ eval:
 logger:
   backend: swanlab # Delete to remove logging
   project_name: occt251230
-  group_name: mlp_INTERACTION_reward_adjust
+  group_name: random_vel_random_arc
   resume_swanlab_id: None # copy from swanlab page
   mode: local
-

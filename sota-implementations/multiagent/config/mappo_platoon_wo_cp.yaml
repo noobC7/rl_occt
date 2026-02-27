@@ -58,7 +58,7 @@ train:
   lr: 5e-5
   max_grad_norm: 40.0
   device: ???
-  resume_from_checkpoint: /home/yons/Graduation/rl_occt/outputs/2026-02-01/23-22-53/checkpoints/checkpoint_iter_499_frames_30000000.pt # absolute path
+  resume_from_checkpoint: /home/yons/Graduation/rl_occt/outputs/2026-02-02_eval_TODO/14-09-21_train_mappo_wo_cp/checkpoints/checkpoint_iter_499_frames_30000000.pt # absolute path
 
 eval:
   evaluation_interval: 10

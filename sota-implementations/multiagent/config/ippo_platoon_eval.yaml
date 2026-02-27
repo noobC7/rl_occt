@@ -13,7 +13,7 @@ env:
     init_vel_mean: 0.0
     init_vel_std: 0.0 # useless if is_rand_init_vel is False
     still_space: 10
-    init_arc_pos: 5.0 # useless if is_rand_arc_pos is False
+    init_arc_pos: 0.0 # useless if is_rand_arc_pos is False
     use_center_frenet_ref: True # True means use continuous frenet reference, False means use discrete reference
     n_nearing_agents_observed: 2
     # reward weights
@@ -36,7 +36,7 @@ env:
 
 model:
   shared_parameters: True
-  centralised_critic: True  # MAPPO if True, IPPO if False
+  centralised_critic: False  # MAPPO if True, IPPO if False
 
 collector:
   frames_per_batch: 60_000 # Frames sampled each sampling iteration
@@ -49,7 +49,7 @@ buffer:
 loss:
   gamma: 0.9
   lmbda: 0.9
-  entropy_eps: 0
+  entropy_eps: 0.05
   clip_epsilon: 0.2
 
 train:
@@ -58,7 +58,7 @@ train:
   lr: 5e-5
   max_grad_norm: 40.0
   device: ???
-  resume_from_checkpoint: /home/yons/Graduation/rl_occt/outputs/2026-02-01/23-22-53/checkpoints/checkpoint_iter_499_frames_30000000.pt # absolute path
+  resume_from_checkpoint: /home/yons/Graduation/rl_occt/outputs/2026-02-02_eval_TODO/14-10-51_train_ippo_w_cp/checkpoints/checkpoint_iter_499_frames_30000000.pt # absolute path
 
 eval:
   evaluation_interval: 10
@@ -66,7 +66,7 @@ eval:
 
 logger:
   backend: swanlab # Delete to remove logging
-  project_name: "MAPPO_PLATOON"
-  group_name: "more_depth_network_and_weight_revise_slightly_eval"
+  project_name: "IPPO_PLATOON"
+  group_name: ""
   resume_swanlab_id: None # copy from swanlab page
   mode: local

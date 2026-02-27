@@ -26,7 +26,7 @@ env:
     reward_track_hinge: 0
     reward_track_ref_heading: 20
     reward_track_ref_path: 100
-    penalty_near_boundary: -100
+    penalty_near_boundary: -200
     penalty_near_other_agents: -100
     # penalty_change_steering: -50
     # penalty_change_acc: -0.008
