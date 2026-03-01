@@ -149,8 +149,19 @@ def plot_agent_data(data, batch_idx=0, agent_idx=0):
     )
 
     # Acceleration
+    if agent_idx==0 or agent_idx==3:
+        vel_mag = data["vel_magnitude"][batch_idx, :valid_time_steps, agent_idx]
+        dt = 0.05
+        # 计算速度差分：np.diff 后长度 = valid_time_steps - 1
+        vel_diff = np.diff(vel_mag)  # [valid_time_steps - 1,]
+        # 加速度 = 速度差分 / 时间间隔
+        acc_diff = vel_diff / dt
+        # 补全第一个时间步的加速度（补0，保证维度与时间步一致）
+        acc_calc = np.concatenate([np.array([0.0]), acc_diff], axis=0)  # [valid_time_steps,]
+    else:
+        acc_calc = data["act_acc"][batch_idx, :valid_time_steps, agent_idx]
     fig.add_trace(
-        go.Scatter(x=time_steps, y=data["act_acc"][batch_idx, :valid_time_steps, agent_idx],
+        go.Scatter(x=time_steps, y=acc_calc,
                 mode='lines', name='Acceleration', line=dict(color=color_list[1]),
                 legendgroup="acceleration", showlegend=True),
         row=1, col=2
@@ -1005,7 +1016,7 @@ if __name__ == "__main_ours__":
     plot_curved_line_analysis(data, batch_idx=1,output_path=os.path.join(output_dir_abs, f"fig_curve_{batch_idx}.pdf")) 
     metrics_df = calculate_and_print_metrics(data, batch_idx=batch_idx,output_dir_abs=output_dir_abs)
 
-if __name__ == "__main__":
+if __name__ == "__main_chapter3_vis__":
     # ippo
     note = "ippo"
     rollout_file_path = "/home/yons/Graduation/rl_occt/outputs/platoon_comparision/16-53-02_eval_ippo_w_cp/run-20260206_165308-8d6kbm5fufhex57cn34gk/rollouts/rollout_iter_499_frames_30000000.pt"
@@ -1030,10 +1041,10 @@ if __name__ == "__main__":
     data, batch_size, time_steps, num_agents = extract_rollout_data(rollouts)
     plot_curved_line_analysis(data, batch_idx=1,output_path=os.path.join(output_dir_abs, f"fig_curve_{batch_idx}.pdf")) 
     metrics_df = calculate_and_print_metrics(data, batch_idx=batch_idx,output_dir_abs=output_dir_abs,note=note)
-if __name__ == "__main_vis__":
+if __name__ == "__main__":
     parser = argparse.ArgumentParser()
-    rollout_file_path = "/home/yons/Graduation/rl_occt/outputs/2026-02-05/17-23-39/run-20260205_172343-kmkmwi4agdl6g7wnr395g/rollouts/rollout_iter_0_frames_0.pt"
-    batch_idx = 1
+    rollout_file_path = "/home/yons/Graduation/rl_occt/outputs/2026-03-01/17-15-38/run-20260301_171542-qw3drqlbxkgo4ves95hhk/rollouts/rollout_iter_0_frames_0.pt"
+    batch_idx = 0
     try:
         print(f"正在加载rollout文件: {rollout_file_path}")
         rollouts = load_rollout(rollout_file_path)
