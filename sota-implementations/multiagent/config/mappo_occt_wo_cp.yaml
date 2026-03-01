@@ -2,32 +2,35 @@ seed: 40
 
 env:
   max_steps: None
-  eval_max_steps: 1500
+  eval_max_steps: 1200
   scenario_name: "occt_scenario"
   scenario:
     viewer_zoom: 17.0
     resolution_factor: 2
     n_agents: 4
     task_class: 1
-    is_rand_arc_pos: False
-    init_vel_mean: 0.0
-    init_vel_std: 0.0 # useless if is_rand_init_vel is False
+    is_rand_arc_pos: True
+    cargo_half_width: 6
+    init_vel_mean: 3.0
+    init_vel_std: 1.0 # useless if is_rand_init_vel is False
     still_space: 6
-    init_arc_pos: 10.0 # useless if is_rand_arc_pos is False
+    init_arc_pos: 0.0 # useless if is_rand_arc_pos is False
     use_center_frenet_ref: True # True means use continuous frenet reference, False means use discrete reference
     n_nearing_agents_observed: 2
     # reward weights
-    reward_progress: 20.0
+    reward_progress: 5.0
     reward_vel: 0
     reward_goal: 100
+    reward_hinge: 0
+    reward_track_hinge: 0
     reward_track_ref_vel: 20       
-    reward_track_ref_space: 50
+    reward_track_ref_space: 0
     reward_track_ref_heading: 0
     reward_track_ref_path: 50
-    penalty_near_boundary: -100
-    penalty_near_other_agents: -100
-    penalty_change_steering: -1.0
-    penalty_change_acc: -0.001
+    penalty_near_boundary: -200
+    penalty_near_other_agents: -200
+    penalty_change_steering: -0.0
+    penalty_change_acc: -0.0
     penalty_collide_with_agents: -200
     penalty_outside_boundaries: -200
     penalty_backward: -100
@@ -40,7 +43,7 @@ model:
 
 collector:
   frames_per_batch: 60_000 # Frames sampled each sampling iteration
-  n_iters: 0 # Number of sampling/training iterations
+  n_iters: 500 # Number of sampling/training iterations
   total_frames: ???
 
 buffer:
@@ -49,7 +52,7 @@ buffer:
 loss:
   gamma: 0.9
   lmbda: 0.9
-  entropy_eps: 0
+  entropy_eps: 0.05
   clip_epsilon: 0.2
 
 train:
@@ -62,11 +65,11 @@ train:
 
 eval:
   evaluation_interval: 10
-  evaluation_episodes: 1
+  evaluation_episodes: 6
 
 logger:
   backend: swanlab # Delete to remove logging
   project_name: "MAPPO_OCCT"
-  group_name: "for_chapter2_occt_simulate"
+  group_name: "ours"
   resume_swanlab_id: None # copy from swanlab page
-  mode: local
+  mode: cloud
