@@ -28,7 +28,7 @@ def rendering_batch_callback(env, td):
         #env.frames[env_index].append(env.render(mode="rgb_array", agent_index_focus=round(env.scenario.n_agents/2)-1, env_index=env_index)) 
         env.frames[env_index].append(env.render(mode="rgb_array", agent_index_focus=0, env_index=env_index)) 
 
-@hydra.main(version_base="1.1", config_path="config", config_name="mappo_platoon_wo_cp")
+@hydra.main(version_base="1.1", config_path="config", config_name="mappo_occt_wo_cp")
 def train(cfg: DictConfig):
     # Device
     cfg.train.device = "cpu" if not torch.cuda.device_count() else "cuda:0"
@@ -55,14 +55,16 @@ def train(cfg: DictConfig):
         env,
         RewardSum(in_keys=[env.reward_key], out_keys=[("agents", "episode_reward")]),
     )
+    cfg_test = cfg.copy()
+    cfg_test.env.scenario.is_rand_arc_pos = False
     env_test = VmasEnv(
-        scenario=cfg.env.scenario_name,
-        num_envs=cfg.eval.evaluation_episodes,
+        scenario=cfg_test.env.scenario_name,
+        num_envs=cfg_test.eval.evaluation_episodes,
         continuous_actions=True,
-        max_steps=cfg.env.eval_max_steps,
-        device=cfg.env.device,
-        seed=cfg.seed,
-        **cfg.env.scenario,
+        max_steps=cfg_test.env.eval_max_steps,
+        device=cfg_test.env.device,
+        seed=cfg_test.seed,
+        **cfg_test.env.scenario,
     )
 
     if cfg.model.shared_parameters:
