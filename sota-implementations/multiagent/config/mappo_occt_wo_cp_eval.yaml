@@ -11,10 +11,11 @@ env:
     task_class: 1
     is_rand_arc_pos: True
     cargo_half_width: 6
+    threshold_near_other_agents_c2c_high: 6
     init_vel_mean: 3.0
     init_vel_std: 1.0 # useless if is_rand_init_vel is False
     still_space: 6
-    init_arc_pos: 20.0 # useless if is_rand_arc_pos is False
+    init_arc_pos: 0.0 # useless if is_rand_arc_pos is False
     use_center_frenet_ref: True # True means use continuous frenet reference, False means use discrete reference
     n_nearing_agents_observed: 2
     # reward weights
@@ -31,7 +32,7 @@ env:
     penalty_near_other_agents: -200
     penalty_change_steering: -0.0
     penalty_change_acc: -0.0
-    penalty_collide_with_agents: -200
+    penalty_collide_with_agents: -400
     penalty_outside_boundaries: -200
     penalty_backward: -100
   device: ??? # These values will be populated dynamically
@@ -61,7 +62,7 @@ train:
   lr: 5e-5
   max_grad_norm: 40.0
   device: ???
-  resume_from_checkpoint: /home/yons/Graduation/rl_occt/outputs/2026-03-01/22-33-28_train_50_step_aver_init/checkpoints/checkpoint_iter_50_frames_3060000.pt # absolute path
+  resume_from_checkpoint: /home/yons/Graduation/rl_occt/outputs/2026-03-03/00-19-47/checkpoints/checkpoint_iter_200_frames_12060000.pt # absolute path
 
 eval:
   evaluation_interval: 10
@@ -72,4 +73,4 @@ logger:
   project_name: "MAPPO_OCCT"
   group_name: "ours_wo_cp_eval"
   resume_swanlab_id: None # copy from swanlab page
-  mode: cloud
+  mode: local
