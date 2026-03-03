@@ -105,8 +105,8 @@ def log_training(
         }
     )
     try:
-        env_total_step = sampling_td.get(("agents", "info", "env_total_step"))[:, -1, 0, 0]
-        road_total_step = sampling_td.get(("agents", "info", "road_total_step"))[0, -1, 0, :]
+        env_total_step = sampling_td.get(("agents", "info", "env_total_step"))[:, -1, 0, 0] #shape[batch_size, T, agent_num,1]
+        road_total_step = sampling_td.get(("agents", "info", "road_total_step"))[0, -1, 0, :] #shape[batch_size, T, agent_num,road_num]
         metrics_to_log.update({
             "train/road_total_step_mean": road_total_step.float().mean().item(),
             "train/env_total_step_mean": env_total_step.float().mean().item(),
@@ -115,7 +115,7 @@ def log_training(
             metrics_to_log.update({
                 f"train/road_{i}_total_step": road_total_step.float()[i].item(),
             })
-        print(f"Total road steps per env: {road_total_step.tolist()}")
+        print(f"Training - Total road steps per env: {road_total_step.tolist()}")
 
     except (KeyError, AttributeError) as e:
         # 如果 info 中没有 max_episode_step_reached 字段，跳过这个统计
@@ -156,11 +156,17 @@ def log_evaluation(
         "eval/episode_reward_min": min(rewards),
         "eval/episode_reward_max": max(rewards),
         "eval/episode_reward_mean": sum(rewards) / len(rollouts),
-        "eval/episode_len_mean": sum([td.batch_size[0] for td in rollouts])
+        "eval/episode_step_mean": sum([td.batch_size[0] for td in rollouts])
         / len(rollouts),
         "eval/evaluation_time": evaluation_time,
     }
-
+    road_total_step=[]
+    for i,td in enumerate(rollouts):
+        metrics_to_log.update({
+            f"eval/road_{i}_total_step": td.batch_size[0],
+        })  
+        road_total_step.append(td.batch_size[0])
+    print(f"Evaluation - Total road steps per env: {road_total_step}")
     vid = torch.tensor(
         np.transpose(env_test.frames[: rollouts[0].batch_size[0]], (0, 3, 1, 2)),
         dtype=torch.uint8,
