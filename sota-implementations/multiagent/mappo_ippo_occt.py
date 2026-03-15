@@ -26,9 +26,9 @@ def rendering_callback(env, td):
 def rendering_batch_callback(env, td):
     for env_index in range(env.num_envs):
         #env.frames[env_index].append(env.render(mode="rgb_array", agent_index_focus=round(env.scenario.n_agents/2)-1, env_index=env_index)) 
-        env.frames[env_index].append(env.render(mode="rgb_array", agent_index_focus=0, env_index=env_index)) 
+        env.frames[env_index].append(env.render(mode="rgb_array", agent_index_focus=1, env_index=env_index)) 
 
-@hydra.main(version_base="1.1", config_path="config", config_name="mappo_occt_wo_cp")
+@hydra.main(version_base="1.1", config_path="config", config_name="mappo_occt_3_followers")
 def train(cfg: DictConfig):
     # Device
     cfg.train.device = "cpu" if not torch.cuda.device_count() else "cuda:0"
@@ -57,6 +57,7 @@ def train(cfg: DictConfig):
     )
     cfg_test = cfg.copy()
     cfg_test.env.scenario.is_rand_arc_pos = False
+    cfg_test.env.scenario.init_vel_std = 0
     env_test = VmasEnv(
         scenario=cfg_test.env.scenario_name,
         num_envs=cfg_test.eval.evaluation_episodes,
@@ -81,8 +82,8 @@ def train(cfg: DictConfig):
             centralised=False,
             share_params=share_params,
             device=cfg.train.device,
-            depth=3,
-            num_cells=256,
+            depth=2,
+            num_cells=128,
             activation_class=nn.Tanh,
         ),
         NormalParamExtractor(),
@@ -292,12 +293,11 @@ def train(cfg: DictConfig):
                     break_when_any_done=False,
                     # We are running vectorized evaluation we do not want it to stop when just one env is done
                 )
-                eval_path_idx = int(env_test.scenario.road.batch_id[0].cpu().numpy())
                 evaluation_time = time.time() - evaluation_start
                 log_evaluation(logger, rollouts, env_test, evaluation_time, 
-                               step=i, video_caption=f"path{eval_path_idx}")
+                               step=i, video_caption=f"path_0")
                 save_checkpoint(logger, policy, value_module, optim, i, total_frames)
-                #save_rollout(logger, rollouts, i, total_frames, suffix=f"_path{eval_path_idx}")
+                save_rollout(logger, rollouts, i, total_frames)
 
         sampling_start = time.time()
     collector.shutdown()

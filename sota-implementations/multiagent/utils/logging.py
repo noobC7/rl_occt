@@ -16,11 +16,13 @@ from torchrl.record.loggers.swanlab import SwanLabLogger
 
 
 def init_logging(cfg, model_name: str):
+    experiment_name=generate_exp_name(model_name, cfg.logger.group_name)
+    print(f"experiment_name: {experiment_name}")
     resume = False if cfg.logger.resume_swanlab_id=="None" else True
     logger = get_logger(
         logger_type=cfg.logger.backend,
         logger_name=os.getcwd(),
-        experiment_name=generate_exp_name(model_name, cfg.logger.group_name),
+        experiment_name=experiment_name,
         wandb_kwargs={
             "group": cfg.logger.group_name or model_name,
             "project": cfg.logger.project_name
