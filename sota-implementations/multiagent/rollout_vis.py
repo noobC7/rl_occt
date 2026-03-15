@@ -74,6 +74,9 @@ def extract_rollout_data(rollouts):
         data["hinge_dis"] = info["hinge_dis"].squeeze(-1).cpu().numpy()  # [batch, time, agent]
         data["hinge_status"] = info["hinge_status"].squeeze(-1).cpu().numpy()  # [batch, time, agent]
         data["reward_track_hinge"] = info["reward_track_hinge"].squeeze(-1).cpu().numpy()  # [batch, time, agent]
+        data["reward_track_hinge_vel"] = info["reward_track_hinge_vel"].squeeze(-1).cpu().numpy()  # [batch, time, agent]
+        data["reward_hinge"] = info["reward_hinge"].squeeze(-1).cpu().numpy()  # [batch, time, agent]
+        data["reward_approach_hinge"] = info["reward_approach_hinge"].squeeze(-1).cpu().numpy()  # [batch, time, agent]
     data["vel_magnitude"] = info["vel_norm"].squeeze(-1).cpu().numpy()  # [batch, time, agent]
     data["ref_vel"] = info["ref_vel"].squeeze(-1).cpu().numpy()  # [batch, time, agent]
     data["rot"] = info["rot"].squeeze(-1).cpu().numpy()  # [batch, time, agent]
@@ -97,6 +100,7 @@ def extract_rollout_data(rollouts):
     data["penalty_outside_boundaries"] = info["penalty_outside_boundaries"].squeeze(-1).cpu().numpy()  # [batch, time, agent]
     data["penalty_near_boundary"] = info["penalty_near_boundary"].squeeze(-1).cpu().numpy()  # [batch, time, agent]
     data["penalty_near_other_agents"] = info["penalty_near_other_agents"].squeeze(-1).cpu().numpy()  # [batch, time, agent]
+    data["penalty_backward"] = info["penalty_backward"].squeeze(-1).cpu().numpy()  # [batch, time, agent]
     return data, batch_size, time_steps, num_agents
     
     
@@ -262,6 +266,24 @@ def plot_agent_data(data, batch_idx=0, agent_idx=0):
             go.Scatter(x=time_steps, y=data["reward_track_hinge"][batch_idx, :valid_time_steps, agent_idx],
                     mode='lines', name='Reward Track Hinge', line=dict(color=color_list[2]),
                     legendgroup="reward_track_hinge", showlegend=True),
+            row=2, col=2
+        )
+        fig.add_trace(
+            go.Scatter(x=time_steps, y=data["reward_track_hinge_vel"][batch_idx, :valid_time_steps, agent_idx],
+                    mode='lines', name='Reward Track Hinge Vel', line=dict(color=color_list[8]),
+                    legendgroup="reward_track_hinge_vel", showlegend=True),
+            row=2, col=2
+        )
+        fig.add_trace(
+            go.Scatter(x=time_steps, y=data["reward_hinge"][batch_idx, :valid_time_steps, agent_idx],
+                    mode='lines', name='Reward Hinge', line=dict(color=color_list[9]),
+                    legendgroup="reward_hinge", showlegend=True),
+            row=2, col=2
+        )
+        fig.add_trace(
+            go.Scatter(x=time_steps, y=data["reward_approach_hinge"][batch_idx, :valid_time_steps, agent_idx],
+                    mode='lines', name='Reward Approach Hinge', line=dict(color=color_list[10]),
+                    legendgroup="reward_approach_hinge", showlegend=True),
             row=2, col=2
         )
     fig.add_trace(
@@ -1043,7 +1065,7 @@ if __name__ == "__main_chapter3_vis__":
     metrics_df = calculate_and_print_metrics(data, batch_idx=batch_idx,output_dir_abs=output_dir_abs,note=note)
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
-    rollout_file_path = "/home/yons/Graduation/rl_occt/outputs/2026-03-01/17-15-38/run-20260301_171542-qw3drqlbxkgo4ves95hhk/rollouts/rollout_iter_0_frames_0.pt"
+    rollout_file_path = "/home/yons/Graduation/rl_occt/outputs/2026-03-15/21-25-16/run-20260315_212518-5cahmj715869yvmqpvein/rollouts/rollout_iter_499_frames_30000000.pt"
     batch_idx = 0
     try:
         print(f"正在加载rollout文件: {rollout_file_path}")
