@@ -28,6 +28,92 @@ def rendering_batch_callback(env, td):
         #env.frames[env_index].append(env.render(mode="rgb_array", agent_index_focus=round(env.scenario.n_agents/2)-1, env_index=env_index)) 
         env.frames[env_index].append(env.render(mode="rgb_array", agent_index_focus=1, env_index=env_index)) 
 
+
+def build_eval_env(cfg_test: DictConfig, num_envs: int) -> VmasEnv:
+    return VmasEnv(
+        scenario=cfg_test.env.scenario_name,
+        num_envs=num_envs,
+        continuous_actions=True,
+        max_steps=cfg_test.env.eval_max_steps,
+        device=cfg_test.env.device,
+        seed=cfg_test.seed,
+        **cfg_test.env.scenario,
+    )
+
+
+def configure_eval_env_paths(env_test: VmasEnv, path_ids: list[int]) -> None:
+    road = env_test.scenario.road
+    full_path_library = list(road.path_library)
+    if not path_ids:
+        raise ValueError("path_ids must not be empty for evaluation.")
+    if max(path_ids) >= len(full_path_library):
+        raise ValueError(
+            f"Requested path id {max(path_ids)} exceeds available paths {len(full_path_library)}."
+        )
+
+    road.path_library = [full_path_library[path_id] for path_id in path_ids]
+    road.reset_splines()
+    road.batch_id = torch.tensor(path_ids, dtype=torch.int64, device=road.device)
+
+    scenario = env_test.scenario
+    scenario.road_total_step = scenario.env_total_step.new_zeros(len(full_path_library))
+    scenario.lane_width = road.get_lane_width("mean")
+    scenario.ref_paths_agent_related.long_term = road.get_road_center_pts().unsqueeze(1).expand(
+        -1, scenario.n_agents, -1, -1
+    )
+    scenario.ref_paths_agent_related.left_boundary = road.get_road_left_pts().unsqueeze(1).expand(
+        -1, scenario.n_agents, -1, -1
+    )
+    scenario.ref_paths_agent_related.right_boundary = road.get_road_right_pts().unsqueeze(1).expand(
+        -1, scenario.n_agents, -1, -1
+    )
+    env_test.reset()
+
+
+def run_eval_export_chunk(
+    logger,
+    policy,
+    env_test: VmasEnv,
+    start_iteration: int,
+    total_frames: int,
+    max_steps: int,
+    chunk_index: int,
+    total_chunks: int,
+):
+    path_ids = env_test.scenario.road.batch_id.detach().cpu().tolist()
+    print(
+        f"[OcctCRMap] Eval chunk {chunk_index + 1}/{total_chunks}, paths: {path_ids}. Start rollout."
+    )
+    evaluation_start = time.time()
+    with torch.no_grad(), set_exploration_type(ExplorationType.DETERMINISTIC):
+        env_test.frames = [[] for _ in range(env_test.num_envs)]
+        rollouts = env_test.rollout(
+            max_steps=max_steps,
+            policy=policy,
+            callback=rendering_batch_callback,
+            auto_cast_to_device=True,
+            break_when_any_done=False,
+            break_when_all_done=True,
+        )
+        rollout_suffix = f"_paths_{path_ids[0]}_{path_ids[-1]}"
+        save_rollout(logger, rollouts, start_iteration, total_frames, suffix=rollout_suffix)
+        evaluation_time = time.time() - evaluation_start
+        print(
+            f"[OcctCRMap] Eval chunk {chunk_index + 1}/{total_chunks} rollout finished, "
+            f"duration: {evaluation_time:.2f}s."
+        )
+        log_batch_video(logger, rollouts, env_test, iter=start_iteration)
+        video_encode_time = time.time() - evaluation_start - evaluation_time
+        print(
+            f"[OcctCRMap] Eval chunk {chunk_index + 1}/{total_chunks} video encode finished, "
+            f"duration: {video_encode_time:.2f}s."
+        )
+
+    env_test.frames = None
+    del rollouts
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
+
 @hydra.main(version_base="1.1", config_path="config", config_name="mappo_occt_3_followers")
 def train(cfg: DictConfig):
     # Device
@@ -58,15 +144,7 @@ def train(cfg: DictConfig):
     cfg_test = cfg.copy()
     cfg_test.env.scenario.is_rand_arc_pos = False
     cfg_test.env.scenario.init_vel_std = 0
-    env_test = VmasEnv(
-        scenario=cfg_test.env.scenario_name,
-        num_envs=cfg_test.eval.evaluation_episodes,
-        continuous_actions=True,
-        max_steps=cfg_test.env.eval_max_steps,
-        device=cfg_test.env.device,
-        seed=cfg_test.seed,
-        **cfg_test.env.scenario,
-    )
+    env_test = None
 
     if cfg.model.shared_parameters:
         share_params = torch.tensor([0] * cfg.env.scenario.n_agents , device=cfg.train.device)
@@ -183,32 +261,49 @@ def train(cfg: DictConfig):
     total_time = 0
     total_frames = start_frames
     if cfg.collector.n_iters == 0:
-        print(f"[OcctCRMap] Path num: {env_test.scenario.get_occt_cr_path_num()}. Start Evaluation.")
-        evaluation_start = time.time()
-        with torch.no_grad(), set_exploration_type(ExplorationType.DETERMINISTIC):
-            env_test.frames = [[] for _ in range(env_test.num_envs)]
-            rollouts = env_test.rollout(
-                max_steps=cfg.env.eval_max_steps,
-                policy=policy,
-                callback=rendering_batch_callback,
-                auto_cast_to_device=True,
-                break_when_any_done=False,
-                break_when_all_done=True,
+        probe_env = build_eval_env(cfg_test, 1)
+        total_path_num = probe_env.scenario.get_occt_cr_path_num()
+        if not probe_env.is_closed:
+            probe_env.close()
+
+        total_eval_paths = min(cfg_test.eval.evaluation_episodes, total_path_num)
+        render_batch_size = int(
+            cfg_test.eval.get("render_batch_size", cfg_test.eval.evaluation_episodes)
+        )
+        render_batch_size = max(1, min(render_batch_size, total_eval_paths))
+        total_chunks = (total_eval_paths + render_batch_size - 1) // render_batch_size
+
+        print(
+            f"[OcctCRMap] Path num: {total_path_num}. "
+            f"Evaluating {total_eval_paths} paths with render_batch_size={render_batch_size}."
+        )
+
+        for chunk_index, chunk_start in enumerate(range(0, total_eval_paths, render_batch_size)):
+            path_ids = list(
+                range(chunk_start, min(chunk_start + render_batch_size, total_eval_paths))
             )
-            save_rollout(logger, rollouts, start_iteration, total_frames)
-            evaluation_time = time.time() - evaluation_start
-            print(f"[OcctCRMap] Evaluation rollout finished, duration: {evaluation_time:.2f}s.")
-            # log_evaluation(logger, rollouts, env_test, evaluation_time, \
-            #                 step=start_iteration, video_caption=f"iter_{start_iteration}_path_{0}.mp4")
-            log_batch_video(logger, rollouts, env_test, iter = start_iteration)
-            video_encode_time = time.time() - evaluation_start - evaluation_time
-            print(f"[OcctCRMap] Evaluation video encode finished, duration: {video_encode_time:.2f}s.")
+            env_test = build_eval_env(cfg_test, len(path_ids))
+            configure_eval_env_paths(env_test, path_ids)
+            try:
+                run_eval_export_chunk(
+                    logger=logger,
+                    policy=policy,
+                    env_test=env_test,
+                    start_iteration=start_iteration,
+                    total_frames=total_frames,
+                    max_steps=cfg.env.eval_max_steps,
+                    chunk_index=chunk_index,
+                    total_chunks=total_chunks,
+                )
+            finally:
+                if not env_test.is_closed:
+                    env_test.close()
 
         if not env.is_closed:
             env.close()
-        if not env_test.is_closed:
-            env_test.close()
         return
+
+    env_test = build_eval_env(cfg_test, cfg_test.eval.evaluation_episodes)
     
     sampling_start = time.time()
     pbar = tqdm(enumerate(collector, start=start_iteration), 

@@ -213,8 +213,14 @@ def log_batch_video(
         rollouts[k] = r[: done_index + 1]
     assert isinstance(logger, SwanLabLogger), "logger must be SwanLabLogger"
     for env_index in tqdm(range(env_test.num_envs), desc="Encoding videos"):
+        road_id = env_index
+        if hasattr(env_test.scenario, "road") and hasattr(env_test.scenario.road, "batch_id"):
+            road_id = int(env_test.scenario.road.batch_id[env_index].item())
+        frame_array = np.stack(
+            env_test.frames[env_index][: rollouts[env_index].batch_size[0]], axis=0
+        )
         vid = torch.tensor(
-            np.transpose(env_test.frames[env_index][: rollouts[env_index].batch_size[0]], (0, 3, 1, 2)),
+            frame_array.transpose(0, 3, 1, 2),
             dtype=torch.uint8,
         ).unsqueeze(0)
-        logger.log_mp4_local(vid, caption=f"iter_{iter}_path_{env_index}.mp4")
+        logger.log_mp4_local(vid, caption=f"iter_{iter}_path_{road_id}.mp4")
