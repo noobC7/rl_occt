@@ -93,12 +93,13 @@ def save_rollout(logger, rollouts, iteration, total_frames, suffix=""):
     
     return rollout_path
 
-def load_checkpoint(checkpoint_path, policy, value_module, optim):
+def load_checkpoint(checkpoint_path, policy=None, value_module=None, optim=None):
     """加载训练检查点并恢复训练状态"""
     checkpoint = torch.load(checkpoint_path)
-    
-    policy.load_state_dict(checkpoint['policy_state_dict'])
-    value_module.load_state_dict(checkpoint['value_module_state_dict'])
+    if policy is not None:
+        policy.load_state_dict(checkpoint['policy_state_dict'])
+    if value_module is not None:
+        value_module.load_state_dict(checkpoint['value_module_state_dict'])
     if optim is not None:
         optim.load_state_dict(checkpoint['optimizer_state_dict'])
     else:

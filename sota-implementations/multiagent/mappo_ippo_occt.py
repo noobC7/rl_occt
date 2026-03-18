@@ -20,13 +20,14 @@ from torchrl.modules.models.multiagent import MultiAgentMLP,GroupSharedMLP
 from torchrl.objectives import ClipPPOLoss, ValueEstimators
 from utils.logging import init_logging, log_evaluation, log_training, log_batch_video
 from utils.utils import DoneTransform, save_checkpoint, save_rollout, load_checkpoint
+AGENT_FOCUS_INDEX=2
 def rendering_callback(env, td):
-    env.frames.append(env.render(mode="rgb_array", agent_index_focus=round(env.scenario.n_agents/2)-1)) 
+    env.frames.append(env.render(mode="rgb_array", agent_index_focus=AGENT_FOCUS_INDEX))
 
 def rendering_batch_callback(env, td):
     for env_index in range(env.num_envs):
         #env.frames[env_index].append(env.render(mode="rgb_array", agent_index_focus=round(env.scenario.n_agents/2)-1, env_index=env_index)) 
-        env.frames[env_index].append(env.render(mode="rgb_array", agent_index_focus=1, env_index=env_index)) 
+        env.frames[env_index].append(env.render(mode="rgb_array", agent_index_focus=AGENT_FOCUS_INDEX, env_index=env_index)) 
 
 
 def build_eval_env(cfg_test: DictConfig, num_envs: int) -> VmasEnv:
@@ -122,6 +123,7 @@ def train(cfg: DictConfig):
     cfg.env.max_steps = eval(cfg.env.max_steps)
     torch.manual_seed(cfg.seed)
     resume_from_checkpoint = cfg.train.resume_from_checkpoint
+    resume_mode = cfg.train.resume_mode
     start_iteration = 0
     start_frames = 0
     # Sampling
@@ -237,9 +239,18 @@ def train(cfg: DictConfig):
     optim = torch.optim.Adam(loss_module.parameters(), cfg.train.lr)
 
     if os.path.exists(resume_from_checkpoint):
-        start_iteration, start_frames = load_checkpoint(
-            resume_from_checkpoint, policy, value_module, optim
-        )
+        if resume_mode == "resume":
+            start_iteration, start_frames = load_checkpoint(
+                resume_from_checkpoint, policy, value_module, optim
+            )
+        elif resume_mode == "warm_start":
+            _ = load_checkpoint(resume_from_checkpoint, policy, value_module, optim=None)
+            start_iteration, start_frames = 0, 0
+        elif resume_mode == "fine_tune":
+            _ = load_checkpoint(resume_from_checkpoint, policy, value_module=None, optim=None)
+            start_iteration, start_frames = 0, 0
+        else:
+            raise TypeError
         torchrl_logger.info(
             f"Resumed training from checkpoint {resume_from_checkpoint} "
             f"at iteration {start_iteration} and frame {start_frames}."
