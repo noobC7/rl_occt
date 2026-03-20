@@ -90,6 +90,8 @@ def log_training(
 
     if "info" in sampling_td.get("agents").keys():
         info_td = sampling_td.get(("agents", "info"))
+        next_info_td = sampling_td.get(("next", "agents", "info"), None)
+        done_info_td = next_info_td if next_info_td is not None else info_td
         metrics_to_log.update(
             {
                 f"train/info/{key}": value.mean().item()
@@ -113,6 +115,52 @@ def log_training(
                 elif "hinge" in key:
                     metrics_to_log[f"train/info/{key}"] = _masked_mean(
                         value, hinge_mask
+                    )
+        episode_done = done_info_td.get("episode_done", None)
+        episode_success = done_info_td.get("episode_success", None)
+        episode_failure = done_info_td.get("episode_failure", None)
+        actual_done = sampling_td.get(("next", "done"), None)
+        if episode_done is not None:
+            metrics_to_log["train/info/scenario_done_rate"] = (
+                episode_done.float().mean().item()
+            )
+        if actual_done is not None:
+            actual_done_mask = actual_done.to(torch.bool)
+            actual_done_count = actual_done.float().sum().item()
+            metrics_to_log["train/info/episode_done_rate"] = (
+                actual_done.float().mean().item()
+            )
+            metrics_to_log["train/info/episode_done_count"] = actual_done_count
+            if episode_done is not None:
+                metrics_to_log["train/info/done_timeout_rate"] = _masked_mean(
+                    (~episode_done.to(torch.bool)).float(), actual_done_mask
+                )
+            if episode_success is not None:
+                success_rate = _masked_mean(
+                    episode_success.float(), actual_done_mask
+                )
+                metrics_to_log["train/info/success_rate"] = success_rate
+                metrics_to_log["train/info/episode_success_count"] = (
+                    success_rate * actual_done_count
+                )
+            if episode_failure is not None:
+                failure_rate = _masked_mean(
+                    episode_failure.float(), actual_done_mask
+                )
+                metrics_to_log["train/info/failure_rate"] = failure_rate
+                metrics_to_log["train/info/episode_failure_count"] = (
+                    failure_rate * actual_done_count
+                )
+            for key in (
+                "done_all_hinged",
+                "done_collision_with_agents",
+                "done_collision_with_lanelets",
+                "done_collision_with_exit_segments",
+            ):
+                value = done_info_td.get(key, None)
+                if value is not None:
+                    metrics_to_log[f"train/info/{key}_rate"] = _masked_mean(
+                        value.float(), actual_done_mask
                     )
 
     reward = sampling_td.get(("next", "agents", "reward")).mean(-2)  # Mean over agents
