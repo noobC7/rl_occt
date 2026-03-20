@@ -15,6 +15,20 @@ from torchrl.record.loggers.wandb import WandbLogger
 from torchrl.record.loggers.swanlab import SwanLabLogger
 
 
+def _masked_mean(value: torch.Tensor, mask: torch.Tensor) -> float:
+    """Compute the mean of value over masked entries.
+
+    Returns 0.0 when the mask selects no entries so logging remains stable.
+    """
+    if mask.ndim < value.ndim:
+        mask = mask.reshape(*mask.shape, *([1] * (value.ndim - mask.ndim)))
+    mask = mask.expand_as(value)
+    selected = value[mask]
+    if selected.numel() == 0:
+        return 0.0
+    return selected.float().mean().item()
+
+
 def init_logging(cfg, model_name: str):
     experiment_name=generate_exp_name(model_name, cfg.logger.group_name)
     print(f"experiment_name: {experiment_name}")
@@ -75,12 +89,31 @@ def log_training(
     }
 
     if "info" in sampling_td.get("agents").keys():
+        info_td = sampling_td.get(("agents", "info"))
         metrics_to_log.update(
             {
                 f"train/info/{key}": value.mean().item()
-                for key, value in sampling_td.get(("agents", "info")).items()
+                for key, value in info_td.items()
             }
         )
+        hinge_status = info_td.get("hinge_status", None)
+        if hinge_status is not None:
+            hinge_mask = hinge_status.to(torch.bool)
+            non_hinge_mask = ~hinge_mask
+            metrics_to_log["train/info/hinge_status_true_ratio"] = (
+                hinge_mask.float().mean().item()
+            )
+            for key, value in info_td.items():
+                if not isinstance(value, torch.Tensor) or not key.startswith("reward_"):
+                    continue
+                if "platoon" in key:
+                    metrics_to_log[f"train/info/{key}"] = _masked_mean(
+                        value, non_hinge_mask
+                    )
+                elif "hinge" in key:
+                    metrics_to_log[f"train/info/{key}"] = _masked_mean(
+                        value, hinge_mask
+                    )
 
     reward = sampling_td.get(("next", "agents", "reward")).mean(-2)  # Mean over agents
     done = sampling_td.get(("next", "done"))
@@ -186,11 +219,11 @@ def log_evaluation(
         )
     if isinstance(logger, SwanLabLogger):
         logger.experiment.log(metrics_to_log)
-        logger.log_video("eval/video", vid, step=step, caption=video_caption)
+        logger.log_video("eval/video", vid, step=step, caption=video_caption, fps=int(1/env_test.world.dt))
     else:
         for key, value in metrics_to_log.items():
             logger.log_scalar(key.replace("/", "_"), value, step=step)
-        logger.log_video("eval_video", vid, step=step)
+        logger.log_video("eval_video", vid, step=step, fps=int(1/env_test.world.dt))
 
 
 def log_batch_video(
@@ -223,4 +256,4 @@ def log_batch_video(
             frame_array.transpose(0, 3, 1, 2),
             dtype=torch.uint8,
         ).unsqueeze(0)
-        logger.log_mp4_local(vid, caption=f"iter_{iter}_path_{road_id}.mp4")
+        logger.log_mp4_local(vid, caption=f"iter_{iter}_path_{road_id}.mp4", fps = int(1/env_test.world.dt))
