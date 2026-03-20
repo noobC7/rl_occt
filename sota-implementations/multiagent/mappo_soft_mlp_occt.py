@@ -26,6 +26,8 @@ from mappo_ippo_occt import (
     AGENT_FOCUS_INDEX,
     build_eval_env,
     configure_eval_env_paths,
+    infer_agent_advantage_exclude_dims,
+    log_advantage_layout,
     rendering_callback,
     run_eval_export_chunk,
 )
@@ -576,7 +578,8 @@ def train(cfg: DictConfig):
         return
 
     env_test = build_eval_env(cfg_test, cfg_test.eval.evaluation_episodes)
-
+    advantage_layout_logged = False
+    minibatch_layout_logged = False
     sampling_start = time.time()
     pbar = tqdm(
         enumerate(collector, start=start_iteration),
@@ -593,6 +596,20 @@ def train(cfg: DictConfig):
                 params=loss_module.critic_network_params,
                 target_params=loss_module.target_critic_network_params,
             )
+        if not advantage_layout_logged:
+            advantage = tensordict_data.get(loss_module.tensor_keys.advantage)
+            loss_module.normalize_advantage_exclude_dims = infer_agent_advantage_exclude_dims(
+                tensordict_data.batch_size,
+                advantage.shape,
+                env.n_agents,
+            )
+            log_advantage_layout("collector", tensordict_data, loss_module, env.n_agents)
+            if not loss_module.normalize_advantage_exclude_dims:
+                print(
+                    "[PPO] Could not infer the agent dimension for advantage normalization. "
+                    "Falling back to global advantage normalization."
+                )
+            advantage_layout_logged = True
         current_frames = tensordict_data.numel()
         total_frames += current_frames
         data_view = tensordict_data.reshape(-1)
@@ -604,6 +621,9 @@ def train(cfg: DictConfig):
             for _ in range(cfg.collector.frames_per_batch // cfg.train.minibatch_size):
                 pbar.set_postfix({"Epoch": f"{epoch_idx + 1}/{cfg.train.num_epochs}"})
                 subdata = replay_buffer.sample()
+                if not minibatch_layout_logged:
+                    log_advantage_layout("minibatch", subdata, loss_module, env.n_agents)
+                    minibatch_layout_logged = True
                 loss_vals = loss_module(subdata)
                 training_tds.append(loss_vals.detach())
 

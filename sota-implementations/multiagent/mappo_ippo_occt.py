@@ -42,6 +42,53 @@ def build_eval_env(cfg_test: DictConfig, num_envs: int) -> VmasEnv:
     )
 
 
+def _safe_get(td, key):
+    try:
+        return td.get(key)
+    except KeyError:
+        return None
+
+
+def infer_agent_advantage_exclude_dims(
+    td_batch_size: torch.Size,
+    advantage_shape: torch.Size,
+    n_agents: int,
+) -> tuple[int, ...]:
+    batch_ndim = len(td_batch_size)
+    extra_dims = list(range(batch_ndim, len(advantage_shape)))
+    if not extra_dims:
+        return ()
+
+    agent_dims = [dim for dim in extra_dims if advantage_shape[dim] == n_agents]
+    if len(agent_dims) == 1:
+        agent_dim = agent_dims[0]
+    else:
+        non_singleton_extra_dims = [dim for dim in extra_dims if advantage_shape[dim] > 1]
+        if len(non_singleton_extra_dims) != 1:
+            return ()
+        agent_dim = non_singleton_extra_dims[0]
+
+    return (agent_dim - len(advantage_shape),)
+
+
+def log_advantage_layout(tag: str, td, loss_module, n_agents: int) -> None:
+    advantage_key = loss_module.tensor_keys.advantage
+    advantage = _safe_get(td, advantage_key)
+    observation = _safe_get(td, ("agents", "observation"))
+    reward = _safe_get(td, ("next", "agents", "reward"))
+    hinge_status = _safe_get(td, ("agents", "info", "hinge_status"))
+    print(
+        f"[PPO][{tag}] td.batch_size={tuple(td.batch_size)}, "
+        f"adv_key={advantage_key}, "
+        f"adv_shape={None if advantage is None else tuple(advantage.shape)}, "
+        f"obs_shape={None if observation is None else tuple(observation.shape)}, "
+        f"reward_shape={None if reward is None else tuple(reward.shape)}, "
+        f"hinge_status_shape={None if hinge_status is None else tuple(hinge_status.shape)}, "
+        f"n_agents={n_agents}, "
+        f"normalize_advantage_exclude_dims={loss_module.normalize_advantage_exclude_dims}"
+    )
+
+
 def configure_eval_env_paths(env_test: VmasEnv, path_ids: list[int]) -> None:
     road = env_test.scenario.road
     full_path_library = list(road.path_library)
@@ -121,6 +168,7 @@ def train(cfg: DictConfig):
     cfg.train.device = "cpu" if not torch.cuda.device_count() else "cuda:0"
     cfg.env.device = cfg.train.device
     cfg.env.max_steps = eval(cfg.env.max_steps)
+    print(cfg.env)
     torch.manual_seed(cfg.seed)
     resume_from_checkpoint = cfg.train.resume_from_checkpoint
     resume_mode = cfg.train.resume_mode
@@ -224,8 +272,9 @@ def train(cfg: DictConfig):
         actor_network=policy,
         critic_network=value_module,
         clip_epsilon=cfg.loss.clip_epsilon,
-        entropy_coef=cfg.loss.entropy_eps,
+        entropy_coeff=cfg.loss.entropy_eps,
         normalize_advantage=True,
+        normalize_advantage_exclude_dims=(-2,),
     )
     loss_module.set_keys(
         reward=env.reward_key,
@@ -315,7 +364,9 @@ def train(cfg: DictConfig):
         return
 
     env_test = build_eval_env(cfg_test, cfg_test.eval.evaluation_episodes)
-    
+
+    advantage_layout_logged = False
+    minibatch_layout_logged = False
     sampling_start = time.time()
     pbar = tqdm(enumerate(collector, start=start_iteration), 
              initial=start_iteration,
@@ -330,6 +381,20 @@ def train(cfg: DictConfig):
                 params=loss_module.critic_network_params,
                 target_params=loss_module.target_critic_network_params,
             )
+        if not advantage_layout_logged:
+            advantage = tensordict_data.get(loss_module.tensor_keys.advantage)
+            loss_module.normalize_advantage_exclude_dims = infer_agent_advantage_exclude_dims(
+                tensordict_data.batch_size,
+                advantage.shape,
+                env.n_agents,
+            )
+            log_advantage_layout("collector", tensordict_data, loss_module, env.n_agents)
+            if not loss_module.normalize_advantage_exclude_dims:
+                print(
+                    "[PPO] Could not infer the agent dimension for advantage normalization. "
+                    "Falling back to global advantage normalization."
+                )
+            advantage_layout_logged = True
         current_frames = tensordict_data.numel()
         total_frames += current_frames
         data_view = tensordict_data.reshape(-1)
@@ -341,6 +406,9 @@ def train(cfg: DictConfig):
             for _ in range(cfg.collector.frames_per_batch // cfg.train.minibatch_size):
                 pbar.set_postfix({"Epoch": f"{epoch_idx+1}/{cfg.train.num_epochs}"})
                 subdata = replay_buffer.sample()
+                if not minibatch_layout_logged:
+                    log_advantage_layout("minibatch", subdata, loss_module, env.n_agents)
+                    minibatch_layout_logged = True
                 loss_vals = loss_module(subdata)
                 training_tds.append(loss_vals.detach())
 
