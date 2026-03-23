@@ -82,7 +82,11 @@ def log_training(
             .expand(sampling_td.get("agents").shape)
             .unsqueeze(-1),
         )
-
+    info_ignore_keys={"episode_done",
+                      "done_all_hinged",
+                      "done_collision_with_agents",
+                      "done_collision_with_lanelets",
+                      "done_collision_with_exit_segments",}
     metrics_to_log = {
         f"train/learner/{key}": value.mean().item()
         for key, value in training_td.items()
@@ -92,12 +96,13 @@ def log_training(
         info_td = sampling_td.get(("agents", "info"))
         next_info_td = sampling_td.get(("next", "agents", "info"), None)
         done_info_td = next_info_td if next_info_td is not None else info_td
-        metrics_to_log.update(
-            {
-                f"train/info/{key}": value.mean().item()
-                for key, value in info_td.items()
-            }
-        )
+        for key, value in info_td.items():
+            if key not in info_ignore_keys:
+                metrics_to_log.update(
+                    {
+                        f"train/info/{key}": value.mean().item()
+                    }
+                )
         hinge_status = info_td.get("hinge_status", None)
         if hinge_status is not None:
             hinge_mask = hinge_status.to(torch.bool)
@@ -116,25 +121,12 @@ def log_training(
                     metrics_to_log[f"train/info/{key}"] = _masked_mean(
                         value, hinge_mask
                     )
-        episode_done = done_info_td.get("episode_done", None)
         episode_success = done_info_td.get("episode_success", None)
         episode_failure = done_info_td.get("episode_failure", None)
         actual_done = sampling_td.get(("next", "done"), None)
-        if episode_done is not None:
-            metrics_to_log["train/info/scenario_done_rate"] = (
-                episode_done.float().mean().item()
-            )
         if actual_done is not None:
             actual_done_mask = actual_done.to(torch.bool)
             actual_done_count = actual_done.float().sum().item()
-            metrics_to_log["train/info/episode_done_rate"] = (
-                actual_done.float().mean().item()
-            )
-            metrics_to_log["train/info/episode_done_count"] = actual_done_count
-            if episode_done is not None:
-                metrics_to_log["train/info/done_timeout_rate"] = _masked_mean(
-                    (~episode_done.to(torch.bool)).float(), actual_done_mask
-                )
             if episode_success is not None:
                 success_rate = _masked_mean(
                     episode_success.float(), actual_done_mask
@@ -188,18 +180,59 @@ def log_training(
         }
     )
     try:
-        env_total_step = sampling_td.get(("agents", "info", "env_total_step"))[:, -1, 0, 0] #shape[batch_size, T, agent_num,1]
-        road_total_step = sampling_td.get(("agents", "info", "road_total_step"))[0, -1, 0, :] #shape[batch_size, T, agent_num,road_num]
-        metrics_to_log.update({
-            "train/road_total_step_mean": road_total_step.float().mean().item(),
-            "train/env_total_step_mean": env_total_step.float().mean().item(),
-        })
-        for i in range(road_total_step.shape[0]):
-            metrics_to_log.update({
-                f"train/road_{i}_total_step": road_total_step.float()[i].item(),
-            })
-        print(f"Training - Total road steps per env: {road_total_step.tolist()}")
+        env_total_step = sampling_td.get(("agents", "info", "env_total_step"))[:, :, 0, 0] #shape[batch_size, T]
+        road_batch_id = sampling_td.get(("agents", "info", "road_batch_id"))[:, -1, 0, 0].to(torch.int64) #shape[batch_size]
+        non_zero_mask = (env_total_step != 0).float()
+        env_max_step = torch.max(env_total_step * non_zero_mask, dim=1)[0]
+        # 初始化结果张量
+        num_roads = torch.unique(road_batch_id).numel()
+        road_mean_step = torch.zeros(num_roads, dtype=env_total_step.dtype, device=env_total_step.device)
+        road_max_step = torch.zeros(num_roads, dtype=env_total_step.dtype, device=env_total_step.device)
+        road_min_step = torch.full((num_roads,), float('inf'), dtype=env_total_step.dtype, device=env_total_step.device)
+        # 均值
+        sum_per_env = torch.sum(env_total_step * non_zero_mask, dim=1)
+        count_per_env = torch.clamp(torch.sum(non_zero_mask, dim=1), min=1)
+        sum_per_road = torch.zeros(num_roads, dtype=env_total_step.dtype, device=env_total_step.device)
+        count_per_road = torch.zeros(num_roads, dtype=env_total_step.dtype, device=env_total_step.device)
+        sum_per_road.scatter_reduce_(dim=0, index=road_batch_id, src=sum_per_env, reduce='sum', include_self=False)
+        count_per_road.scatter_reduce_(dim=0, index=road_batch_id, src=count_per_env, reduce='sum', include_self=False)
+        # 最大值
+        road_mean_step = sum_per_road / count_per_road
+        max_per_env = torch.max(env_total_step * non_zero_mask, dim=1)[0]
+        road_max_step.scatter_reduce_(dim=0, index=road_batch_id, src=max_per_env, reduce='max', include_self=False)
+        # 最小值
+        env_non_zero_only = torch.where(non_zero_mask.bool(), env_total_step, torch.full_like(env_total_step, float('inf')))
+        min_per_env = torch.min(env_non_zero_only, dim=1)[0]
+        road_min_step.scatter_reduce_(dim=0, index=road_batch_id, src=min_per_env, reduce='min', include_self=False)
+        road_min_step = torch.where(torch.isinf(road_min_step), torch.tensor(0.0, device=road_min_step.device), road_min_step)
 
+        env_max_step = torch.max(max_per_env, dim=0)[0]
+        env_min_step = torch.min(min_per_env, dim=0)[0]
+        env_mean_step = torch.sum(sum_per_env, dim=0)/torch.sum(count_per_env, dim=0)
+        metrics_to_log.update({
+            "train/road_mean_step": road_mean_step.mean().float().item(),
+            "train/road_max_step": road_max_step.mean().float().item(),
+            "train/road_min_step": road_min_step.mean().float().item(),
+            "train/env_max_step": env_max_step.float().item(),
+            "train/env_min_step": env_min_step.float().item(),
+            "train/env_mean_step": env_mean_step.float().item(),
+        })
+        for i in range(road_mean_step.shape[0]):
+            metrics_to_log.update({
+                f"train/road_{i}_mean_step": road_mean_step.float()[i].item(),
+            })
+            metrics_to_log.update({
+                f"train/road_{i}_max_step": road_max_step.float()[i].item(),
+            })
+            metrics_to_log.update({
+                f"train/road_{i}_min_step": road_min_step.float()[i].item(),
+            })
+        road_min_step_formatted = [int(round(x, 0)) for x in road_min_step.tolist()]
+        road_mean_step_formatted = [int(round(x, 0)) for x in road_mean_step.tolist()]
+        road_max_step_formatted = [int(round(x, 0)) for x in road_max_step.tolist()]
+        print(f"Training - Total road min steps: {road_min_step_formatted}, "
+            f"mean steps: {road_mean_step_formatted}, "
+            f"max steps: {road_max_step_formatted}")
     except (KeyError, AttributeError) as e:
         # 如果 info 中没有 max_episode_step_reached 字段，跳过这个统计
         print(f"Warning: Could not extract max_episode_step_reached from info: {e}")
