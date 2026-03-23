@@ -2,12 +2,12 @@ seed: 40
 
 env:
   max_steps: None
-  eval_max_steps: 1000 #cant be more than 1200, otherwise trainning will be extremely slow
+  eval_max_steps: 1500
   scenario_name: "occt_scenario"
   scenario:
     enable_obs_audit: False
     viewer_zoom: 20.0
-    resolution_factor: 4
+    resolution_factor: 3
     n_agents: 5
     task_class: 1
     is_rand_arc_pos: False
@@ -30,7 +30,7 @@ env:
     reward_platoon_ref: 50
     reward_platoon_heading: 10
     
-    reward_hinge: 2000    
+    reward_hinge: 20000    
     reward_hinge_vel: 20
     reward_hinge_space: 20
     reward_hinge_ref: 20
@@ -79,10 +79,12 @@ train:
 eval:
   evaluation_interval: 10
   evaluation_episodes: 6
+  render_batch_size: 6
 
 logger:
+  # api: k6ojXGwJPKWLounY3nzZX
   backend: swanlab # Delete to remove logging
   project_name: "MAPPO_OCCT_TWO_STAGE"
-  group_name: "ours0320_baseline_hinge_stage_train"
+  group_name: "ours0323_baseline_two_stage_train"
   resume_swanlab_id: None # copy from swanlab page
   mode: local
