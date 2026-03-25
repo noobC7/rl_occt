@@ -5,6 +5,7 @@ import torch
 from omegaconf import DictConfig
 from torch import nn
 from tqdm import tqdm
+from tensordict import TensorDict
 from tensordict.nn import TensorDictModule
 from tensordict.nn.distributions import NormalParamExtractor
 from torchrl._utils import logger as torchrl_logger
@@ -16,7 +17,10 @@ from torchrl.envs import RewardSum, TransformedEnv
 from torchrl.envs.libs.vmas import VmasEnv
 from torchrl.envs.utils import ExplorationType, set_exploration_type
 from torchrl.modules import ProbabilisticActor, TanhNormal, ValueOperator
-from torchrl.modules.models.multiagent import MultiAgentMLP,GroupSharedMLP
+from torchrl.modules.models.multiagent import (
+    MultiAgentMLP,
+    PhaseConditionedMultiAgentMLP,
+)
 from torchrl.objectives import ClipPPOLoss, ValueEstimators
 from utils.logging import init_logging, log_evaluation, log_training, log_batch_video
 from utils.utils import DoneTransform, save_checkpoint, save_rollout, load_checkpoint
@@ -47,6 +51,81 @@ def _safe_get(td, key):
         return td.get(key)
     except KeyError:
         return None
+
+
+def _ensure_phase_mask(mask: torch.Tensor) -> torch.Tensor:
+    if mask.dtype is not torch.bool:
+        mask = mask > 0.5
+    if mask.ndim == 0:
+        mask = mask.unsqueeze(0)
+    if mask.shape[-1] != 1:
+        mask = mask.unsqueeze(-1)
+    return mask
+
+
+def _expand_mask(mask: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
+    while mask.ndim > target.ndim and mask.shape[-1] == 1:
+        mask = mask.squeeze(-1)
+    if mask.ndim < target.ndim:
+        mask = mask.reshape(*mask.shape, *([1] * (target.ndim - mask.ndim)))
+    if mask.ndim != target.ndim:
+        raise RuntimeError(
+            f"Mask/target ndim mismatch after alignment: mask={tuple(mask.shape)}, "
+            f"target={tuple(target.shape)}"
+        )
+    return mask.expand_as(target)
+
+
+def _masked_tensor_mean(value: torch.Tensor, mask: torch.Tensor) -> torch.Tensor:
+    if not isinstance(value, torch.Tensor):
+        return torch.as_tensor(value, device=mask.device)
+    if value.ndim == 0:
+        return value
+    expanded_mask = _expand_mask(mask, value)
+    if bool(expanded_mask.any().item()):
+        return value[expanded_mask].mean()
+    return value.sum() * 0.0
+
+
+def _reduce_metric(value) -> torch.Tensor:
+    if isinstance(value, torch.Tensor):
+        return value.mean()
+    return torch.as_tensor(value)
+
+
+def _safe_info_get(td, info_key: str):
+    value = _safe_get(td, ("agents", "info", info_key))
+    if value is None:
+        value = _safe_get(td, ("next", "agents", "info", info_key))
+    return value
+
+
+def infer_observation_group_slices(
+    vmas_env: VmasEnv, agent_index: int = 0
+) -> dict[str, slice]:
+    agent_index = min(max(agent_index, 0), vmas_env.n_agents - 1)
+    td = vmas_env.reset()
+    scenario = vmas_env.scenario
+    _, obs_self_groups = scenario.observe_self(agent_index, return_groups=True)
+    _, obs_other_groups = scenario.observe_other_agents_platoon(
+        agent_index, return_groups=True
+    )
+    total_obs_dim = td["agents", "observation"].shape[-1]
+
+    group_slices = {}
+    cursor = 0
+    for name, tensor in [*obs_self_groups, *obs_other_groups]:
+        if tensor is None:
+            continue
+        next_cursor = cursor + int(tensor.shape[-1])
+        group_slices[name] = slice(cursor, next_cursor)
+        cursor = next_cursor
+
+    if cursor > total_obs_dim:
+        raise RuntimeError(
+            f"Observation groups exceed total observation dim: {cursor} > {total_obs_dim}."
+        )
+    return group_slices
 
 
 def infer_agent_advantage_exclude_dims(
@@ -87,6 +166,326 @@ def log_advantage_layout(tag: str, td, loss_module, n_agents: int) -> None:
         f"n_agents={n_agents}, "
         f"normalize_advantage_exclude_dims={loss_module.normalize_advantage_exclude_dims}"
     )
+
+
+def extract_training_phase_masks(
+    td,
+    hinge_key: str = "hinge_status",
+    agent_hinged_key: str = "agent_hinge_status",
+) -> tuple[torch.Tensor, torch.Tensor]:
+    hinge_status = _safe_info_get(td, hinge_key)
+    agent_hinged = _safe_info_get(td, agent_hinged_key)
+    if hinge_status is None or agent_hinged is None:
+        raise KeyError(
+            "Could not find hinge_status/agent_hinge_status in env info. "
+            "Phase-conditioned training requires these signals."
+        )
+    hinge_status = _ensure_phase_mask(hinge_status)
+    agent_hinged = _ensure_phase_mask(agent_hinged)
+    hinge_approach_mask = hinge_status & ~agent_hinged
+    platoon_mask = (~hinge_status) & ~agent_hinged
+    return platoon_mask, hinge_approach_mask
+
+
+class MetricAdaptiveWeightController:
+    def __init__(self, cfg: DictConfig, device: torch.device | str) -> None:
+        adaptive_cfg = cfg.get("adaptive_weighting", {})
+        self.enabled = bool(adaptive_cfg.get("enabled", False))
+        self.ema_tau = float(adaptive_cfg.get("ema_tau", 0.1))
+        self.initial_hinge_weight = float(
+            adaptive_cfg.get("initial_hinge_weight", 0.0)
+        )
+        self.min_platoon_weight = float(
+            adaptive_cfg.get("min_platoon_weight", 0.2)
+        )
+        self.max_hinge_weight = float(
+            adaptive_cfg.get("max_hinge_weight", 0.8)
+        )
+        self.collision_high_threshold = float(
+            adaptive_cfg.get("collision_high_threshold", 0.20)
+        )
+        self.collision_low_threshold = float(
+            adaptive_cfg.get("collision_low_threshold", 0.08)
+        )
+        self.platoon_space_error_threshold = float(
+            adaptive_cfg.get("platoon_space_error_threshold", 0.60)
+        )
+        self.platoon_ref_error_threshold = float(
+            adaptive_cfg.get("platoon_ref_error_threshold", 0.20)
+        )
+        self.all_hinged_target = float(adaptive_cfg.get("all_hinged_target", 0.85))
+        self.all_hinged_plateau_delta = float(
+            adaptive_cfg.get("all_hinged_plateau_delta", 0.01)
+        )
+        self.plateau_patience = int(adaptive_cfg.get("plateau_patience", 3))
+        self.hinge_weight_step = float(adaptive_cfg.get("hinge_weight_step", 0.05))
+        self.collision_weight_step = float(
+            adaptive_cfg.get("collision_weight_step", 0.10)
+        )
+        self.device = torch.device(device)
+
+        self.hinge_weight = self.initial_hinge_weight
+        self.collision_rate_ema = None
+        self.platoon_space_error_ema = None
+        self.platoon_ref_error_ema = None
+        self.all_hinged_rate_ema = None
+        self.plateau_counter = 0
+
+    def _update_ema(self, current: torch.Tensor, attr_name: str) -> torch.Tensor:
+        previous = getattr(self, attr_name)
+        if previous is None:
+            updated = current.detach()
+        else:
+            updated = torch.lerp(previous, current.detach(), self.ema_tau)
+        setattr(self, attr_name, updated)
+        return updated
+
+    def _make_weight_tensor(
+        self, platoon_weight: float, hinge_weight: float, device: torch.device
+    ) -> dict[str, torch.Tensor]:
+        weight_sum = max(platoon_weight + hinge_weight, 1e-8)
+        return {
+            "platoon": torch.tensor(
+                platoon_weight / weight_sum, device=device, dtype=torch.float32
+            ),
+            "hinge_approach": torch.tensor(
+                hinge_weight / weight_sum, device=device, dtype=torch.float32
+            ),
+        }
+
+    def collector_state(self, td) -> dict[str, object]:
+        platoon_mask, hinge_approach_mask = extract_training_phase_masks(td)
+        done_mask = _safe_info_get(td, "episode_done")
+        done_all_hinged = _safe_info_get(td, "done_all_hinged")
+        collision_agents = _safe_info_get(td, "done_collision_with_agents")
+        collision_lanelets = _safe_info_get(td, "done_collision_with_lanelets")
+        collision_exit = _safe_info_get(td, "done_collision_with_exit_segments")
+        error_space = _safe_info_get(td, "error_space")
+        distance_ref = _safe_info_get(td, "distance_ref")
+
+        done_mask = _ensure_phase_mask(done_mask) if done_mask is not None else None
+        done_all_hinged = (
+            _ensure_phase_mask(done_all_hinged) if done_all_hinged is not None else None
+        )
+        collision_any = None
+        if (
+            collision_agents is not None
+            and collision_lanelets is not None
+            and collision_exit is not None
+        ):
+            collision_any = (
+                _ensure_phase_mask(collision_agents)
+                | _ensure_phase_mask(collision_lanelets)
+                | _ensure_phase_mask(collision_exit)
+            )
+
+        if done_mask is not None and bool(done_mask.any().item()):
+            collision_rate = (
+                collision_any[done_mask].float().mean()
+                if collision_any is not None
+                else torch.zeros((), device=self.device)
+            )
+            all_hinged_rate = (
+                done_all_hinged[done_mask].float().mean()
+                if done_all_hinged is not None
+                else torch.zeros((), device=self.device)
+            )
+        else:
+            collision_rate = (
+                collision_any.float().mean()
+                if collision_any is not None
+                else torch.zeros((), device=self.device)
+            )
+            all_hinged_rate = torch.zeros((), device=self.device)
+
+        if error_space is not None:
+            platoon_space_error = _masked_tensor_mean(
+                torch.abs(error_space[..., 0]),
+                platoon_mask,
+            )
+        else:
+            platoon_space_error = torch.zeros((), device=self.device)
+
+        if distance_ref is not None:
+            platoon_ref_error = _masked_tensor_mean(
+                torch.abs(distance_ref),
+                platoon_mask,
+            )
+        else:
+            platoon_ref_error = torch.zeros((), device=self.device)
+
+        collision_rate_ema = self._update_ema(collision_rate, "collision_rate_ema")
+        platoon_space_error_ema = self._update_ema(
+            platoon_space_error, "platoon_space_error_ema"
+        )
+        platoon_ref_error_ema = self._update_ema(
+            platoon_ref_error, "platoon_ref_error_ema"
+        )
+        previous_all_hinged_ema = self.all_hinged_rate_ema
+        all_hinged_rate_ema = self._update_ema(
+            all_hinged_rate, "all_hinged_rate_ema"
+        )
+        all_hinged_improvement = (
+            0.0
+            if previous_all_hinged_ema is None
+            else float((all_hinged_rate_ema - previous_all_hinged_ema).item())
+        )
+
+        stable_platoon = bool(
+            collision_rate_ema.item() < self.collision_low_threshold
+            and platoon_space_error_ema.item() < self.platoon_space_error_threshold
+            and platoon_ref_error_ema.item() < self.platoon_ref_error_threshold
+        )
+
+        if not self.enabled:
+            weights = self._make_weight_tensor(1.0, 0.0, platoon_mask.device)
+        else:
+            if collision_rate_ema.item() > self.collision_high_threshold:
+                self.hinge_weight = max(
+                    0.0, self.hinge_weight - self.collision_weight_step
+                )
+                self.plateau_counter = 0
+            elif (
+                stable_platoon
+                and all_hinged_rate_ema.item() < self.all_hinged_target
+                and all_hinged_improvement < self.all_hinged_plateau_delta
+            ):
+                self.plateau_counter += 1
+                if self.plateau_counter >= self.plateau_patience:
+                    self.hinge_weight = min(
+                        self.max_hinge_weight,
+                        self.hinge_weight + self.hinge_weight_step,
+                    )
+                    self.plateau_counter = 0
+            else:
+                self.plateau_counter = 0
+
+            platoon_weight = max(self.min_platoon_weight, 1.0 - self.hinge_weight)
+            hinge_weight = min(self.max_hinge_weight, 1.0 - platoon_weight)
+            weights = self._make_weight_tensor(
+                platoon_weight,
+                hinge_weight,
+                platoon_mask.device,
+            )
+
+        metrics = {
+            "train/adaptive_weighting/enabled": float(self.enabled),
+            "train/adaptive_weighting/w_platoon": float(weights["platoon"].item()),
+            "train/adaptive_weighting/w_hinge_approach": float(
+                weights["hinge_approach"].item()
+            ),
+            "train/adaptive_weighting/collision_rate": float(collision_rate.item()),
+            "train/adaptive_weighting/collision_rate_ema": float(
+                collision_rate_ema.item()
+            ),
+            "train/adaptive_weighting/all_hinged_rate": float(all_hinged_rate.item()),
+            "train/adaptive_weighting/all_hinged_rate_ema": float(
+                all_hinged_rate_ema.item()
+            ),
+            "train/adaptive_weighting/all_hinged_improvement": all_hinged_improvement,
+            "train/adaptive_weighting/platoon_space_error": float(
+                platoon_space_error.item()
+            ),
+            "train/adaptive_weighting/platoon_space_error_ema": float(
+                platoon_space_error_ema.item()
+            ),
+            "train/adaptive_weighting/platoon_ref_error": float(
+                platoon_ref_error.item()
+            ),
+            "train/adaptive_weighting/platoon_ref_error_ema": float(
+                platoon_ref_error_ema.item()
+            ),
+            "train/adaptive_weighting/platoon_stable": float(stable_platoon),
+            "train/adaptive_weighting/plateau_counter": float(self.plateau_counter),
+            "train/adaptive_weighting/platoon_ratio": float(
+                platoon_mask.float().mean().item()
+            ),
+            "train/adaptive_weighting/hinge_approach_ratio": float(
+                hinge_approach_mask.float().mean().item()
+            ),
+        }
+        return {"weights": weights, "metrics": metrics}
+
+
+def build_training_summary(
+    loss_vals,
+    platoon_mask: torch.Tensor,
+    hinge_approach_mask: torch.Tensor,
+    phase_weights: dict[str, torch.Tensor] | None,
+) -> tuple[torch.Tensor, TensorDict]:
+    summary = TensorDict({}, batch_size=[])
+
+    if phase_weights is None:
+        component_totals = []
+        for key in ("loss_objective", "loss_critic", "loss_entropy"):
+            if key not in loss_vals.keys():
+                continue
+            component_value = _reduce_metric(loss_vals[key])
+            summary.set(key, component_value.detach())
+            component_totals.append(component_value)
+        loss_value = sum(component_totals)
+        summary.set(
+            "adaptive_weight_platoon", torch.tensor(1.0, device=loss_value.device)
+        )
+        summary.set(
+            "adaptive_weight_hinge_approach",
+            torch.tensor(0.0, device=loss_value.device),
+        )
+    else:
+        weighted_component_totals = {}
+        platoon_has_samples = bool(platoon_mask.any().item())
+        hinge_has_samples = bool(hinge_approach_mask.any().item())
+        if platoon_has_samples and hinge_has_samples:
+            platoon_weight = phase_weights["platoon"]
+            hinge_weight = phase_weights["hinge_approach"]
+        elif platoon_has_samples:
+            platoon_weight = torch.tensor(1.0, device=platoon_mask.device)
+            hinge_weight = torch.tensor(0.0, device=platoon_mask.device)
+        elif hinge_has_samples:
+            platoon_weight = torch.tensor(0.0, device=platoon_mask.device)
+            hinge_weight = torch.tensor(1.0, device=platoon_mask.device)
+        else:
+            platoon_weight = torch.tensor(1.0, device=platoon_mask.device)
+            hinge_weight = torch.tensor(0.0, device=platoon_mask.device)
+        for key in ("loss_objective", "loss_critic", "loss_entropy"):
+            if key not in loss_vals.keys():
+                continue
+            platoon_component = _masked_tensor_mean(loss_vals[key], platoon_mask)
+            hinge_component = _masked_tensor_mean(
+                loss_vals[key], hinge_approach_mask
+            )
+            weighted_component = (
+                platoon_weight * platoon_component
+                + hinge_weight * hinge_component
+            )
+            weighted_component_totals[key] = weighted_component
+            summary.set(key, weighted_component.detach())
+            summary.set(f"{key}_platoon", platoon_component.detach())
+            summary.set(f"{key}_hinge_approach", hinge_component.detach())
+        loss_value = sum(weighted_component_totals.values())
+        summary.set("adaptive_weight_platoon", platoon_weight.detach())
+        summary.set(
+            "adaptive_weight_hinge_approach",
+            hinge_weight.detach(),
+        )
+
+    summary.set("adaptive_ratio_platoon", platoon_mask.float().mean().detach())
+    summary.set(
+        "adaptive_ratio_hinge_approach",
+        hinge_approach_mask.float().mean().detach(),
+    )
+    for metric_key in (
+        "entropy",
+        "clip_fraction",
+        "kl_approx",
+        "ESS",
+        "explained_variance",
+    ):
+        metric_value = loss_vals.get(metric_key, None)
+        if metric_value is not None:
+            summary.set(metric_key, _reduce_metric(metric_value).detach())
+
+    return loss_value, summary
 
 
 def configure_eval_env_paths(env_test: VmasEnv, path_ids: list[int]) -> None:
@@ -196,13 +595,42 @@ def train(cfg: DictConfig):
     cfg_test.env.scenario.init_vel_std = 0
     env_test = None
 
-    if cfg.model.shared_parameters:
-        share_params = torch.tensor([0] * cfg.env.scenario.n_agents , device=cfg.train.device)
-    else:
-        share_params = torch.tensor([0] + [1] * (cfg.env.scenario.n_agents - 1), device=cfg.train.device)
+    share_params = True if cfg.model.shared_parameters else False
+    use_phase_conditioned_network = bool(
+        cfg.model.get("use_phase_conditioned_network", False)
+    )
     # Policy
-    actor_net = nn.Sequential(
-        GroupSharedMLP( 
+    actor_depth = int(cfg.model.get("actor_depth", 2))
+    actor_num_cells = cfg.model.get("actor_num_cells", 344)
+    actor_head_hidden = cfg.model.get(
+        "actor_head_hidden", cfg.model.get("actor_module_hidden", actor_num_cells)
+    )
+    critic_depth = int(cfg.model.get("critic_depth", 2))
+    critic_num_cells = cfg.model.get("critic_num_cells", 688)
+    critic_head_hidden = cfg.model.get(
+        "critic_head_hidden", cfg.model.get("critic_module_hidden", critic_num_cells)
+    )
+    if use_phase_conditioned_network and not bool(cfg.model.get("centralised_critic", True)):
+        torchrl_logger.warning(
+            "Phase-conditioned OCCT training always uses a centralized critic. "
+            "Overriding model.centralised_critic=False."
+        )
+    phase_slice = None
+    if use_phase_conditioned_network:
+        observation_env = env.base_env if hasattr(env, "base_env") else env
+        observation_group_slices = infer_observation_group_slices(
+            observation_env, agent_index=min(AGENT_FOCUS_INDEX, env.n_agents - 1)
+        )
+        phase_obs_group = cfg.model.get("phase_obs_group", "self_hinge_status")
+        if phase_obs_group not in observation_group_slices:
+            raise KeyError(
+                f"Observation group '{phase_obs_group}' not found. Available groups: "
+                f"{sorted(observation_group_slices.keys())}"
+            )
+        phase_slice = observation_group_slices[phase_obs_group]
+
+    if use_phase_conditioned_network:
+        actor_backbone = PhaseConditionedMultiAgentMLP(
             n_agent_inputs=env.observation_spec["agents", "observation"].shape[-1],
             n_agent_outputs=2
             * env.full_action_spec_unbatched[env.action_key].shape[-1],
@@ -210,12 +638,26 @@ def train(cfg: DictConfig):
             centralised=False,
             share_params=share_params,
             device=cfg.train.device,
-            depth=2,
-            num_cells=128,
+            depth=actor_depth,
+            num_cells=actor_num_cells,
+            head_hidden=actor_head_hidden,
             activation_class=nn.Tanh,
-        ),
-        NormalParamExtractor(),
-    )
+            phase_slice=phase_slice,
+        )
+    else:
+        actor_backbone = MultiAgentMLP(
+            n_agent_inputs=env.observation_spec["agents", "observation"].shape[-1],
+            n_agent_outputs=2
+            * env.full_action_spec_unbatched[env.action_key].shape[-1],
+            n_agents=env.n_agents,
+            centralised=False,
+            share_params=share_params,
+            device=cfg.train.device,
+            depth=actor_depth,
+            num_cells=actor_num_cells,
+            activation_class=nn.Tanh,
+        )
+    actor_net = nn.Sequential(actor_backbone, NormalParamExtractor())
     policy_module = TensorDictModule(
         actor_net,
         in_keys=[("agents", "observation")],
@@ -235,21 +677,37 @@ def train(cfg: DictConfig):
     )
 
     # Critic
-    module = GroupSharedMLP(
-        n_agent_inputs=env.observation_spec["agents", "observation"].shape[-1],
-        n_agent_outputs=1,
-        n_agents=env.n_agents,
-        centralised=cfg.model.centralised_critic,
-        share_params=share_params,
-        device=cfg.train.device,
-        depth=2,
-        num_cells=256,
-        activation_class=nn.Tanh,
-    )
+    if use_phase_conditioned_network:
+        module = PhaseConditionedMultiAgentMLP(
+            n_agent_inputs=env.observation_spec["agents", "observation"].shape[-1],
+            n_agent_outputs=1,
+            n_agents=env.n_agents,
+            centralised=True,
+            share_params=share_params,
+            device=cfg.train.device,
+            depth=critic_depth,
+            num_cells=critic_num_cells,
+            head_hidden=critic_head_hidden,
+            activation_class=nn.Tanh,
+            phase_slice=phase_slice,
+        )
+    else:
+        module = MultiAgentMLP(
+            n_agent_inputs=env.observation_spec["agents", "observation"].shape[-1],
+            n_agent_outputs=1,
+            n_agents=env.n_agents,
+            centralised=cfg.model.centralised_critic,
+            share_params=share_params,
+            device=cfg.train.device,
+            depth=critic_depth,
+            num_cells=critic_num_cells,
+            activation_class=nn.Tanh,
+        )
     value_module = ValueOperator(
         module=module,
         in_keys=[("agents", "observation")],
     )
+    phase_weight_controller = MetricAdaptiveWeightController(cfg, cfg.train.device)
     if cfg.collector.n_iters > 0:
         collector = SyncDataCollector(
             env,
@@ -275,6 +733,7 @@ def train(cfg: DictConfig):
         entropy_coeff=cfg.loss.entropy_eps,
         normalize_advantage=True,
         normalize_advantage_exclude_dims=(-2,),
+        reduction="none",
     )
     loss_module.set_keys(
         reward=env.reward_key,
@@ -311,11 +770,10 @@ def train(cfg: DictConfig):
         )
     # Logging
     if cfg.logger.backend:
-        model_name = (
-            ("Het" if not cfg.model.shared_parameters else "")
-            + ("MA" if cfg.model.centralised_critic else "I")
-            + "PPO"
-        )
+        model_prefix = "PhaseMAPPO" if use_phase_conditioned_network else "MAPPO"
+        if not use_phase_conditioned_network and not cfg.model.centralised_critic:
+            model_prefix = "IPPO"
+        model_name = ("Het" if not cfg.model.shared_parameters else "") + model_prefix
         logger = init_logging(cfg, model_name)
 
     total_time = 0
@@ -395,6 +853,8 @@ def train(cfg: DictConfig):
                     "Falling back to global advantage normalization."
                 )
             advantage_layout_logged = True
+        phase_state = phase_weight_controller.collector_state(tensordict_data)
+        iteration_extra_metrics = phase_state["metrics"]
         current_frames = tensordict_data.numel()
         total_frames += current_frames
         data_view = tensordict_data.reshape(-1)
@@ -410,13 +870,19 @@ def train(cfg: DictConfig):
                     log_advantage_layout("minibatch", subdata, loss_module, env.n_agents)
                     minibatch_layout_logged = True
                 loss_vals = loss_module(subdata)
-                training_tds.append(loss_vals.detach())
-
-                loss_value = (
-                    loss_vals["loss_objective"]
-                    + loss_vals["loss_critic"]
-                    + loss_vals["loss_entropy"]
+                platoon_mask, hinge_approach_mask = extract_training_phase_masks(
+                    subdata
                 )
+                active_phase_weights = (
+                    phase_state["weights"] if phase_weight_controller.enabled else None
+                )
+                loss_value, training_summary = build_training_summary(
+                    loss_vals,
+                    platoon_mask,
+                    hinge_approach_mask,
+                    active_phase_weights,
+                )
+                training_tds.append(training_summary.detach())
 
                 loss_value.backward()
 
@@ -449,6 +915,7 @@ def train(cfg: DictConfig):
                 current_frames,
                 total_frames,
                 step=i,
+                extra_metrics=iteration_extra_metrics,
             )
 
         if (

@@ -467,6 +467,171 @@ class MultiAgentMLP(MultiAgentNetBase):
         )
 
 
+class _PhaseConditionedAgentMLP(nn.Module):
+    def __init__(
+        self,
+        *,
+        input_dim: int,
+        out_features: int,
+        device=None,
+        depth: int | None = None,
+        num_cells: Sequence | int | None = None,
+        head_hidden: int | None = None,
+        activation_class: type[nn.Module] | None = nn.Tanh,
+    ):
+        super().__init__()
+        depth = 2 if depth is None else depth
+        num_cells = 128 if num_cells is None else num_cells
+        hidden_size = num_cells[-1] if isinstance(num_cells, Sequence) else num_cells
+        hidden_size = 128 if hidden_size is None else hidden_size
+        head_hidden = hidden_size if head_hidden is None else head_hidden
+
+        self.trunk = MLP(
+            in_features=input_dim,
+            out_features=hidden_size,
+            depth=depth,
+            num_cells=num_cells,
+            activation_class=activation_class,
+            activate_last_layer=False,
+            device=device,
+        )
+        self.platoon_head = MLP(
+            in_features=hidden_size,
+            out_features=out_features,
+            depth=1,
+            num_cells=head_hidden,
+            activation_class=activation_class,
+            activate_last_layer=False,
+            device=device,
+        )
+        self.hinge_head = MLP(
+            in_features=hidden_size,
+            out_features=out_features,
+            depth=1,
+            num_cells=head_hidden,
+            activation_class=activation_class,
+            activate_last_layer=False,
+            device=device,
+        )
+
+    def forward(
+        self, inputs: torch.Tensor, phase_weight: torch.Tensor | None = None
+    ) -> torch.Tensor:
+        features = self.trunk(inputs)
+        platoon_output = self.platoon_head(features)
+        hinge_output = self.hinge_head(features)
+        if phase_weight is None:
+            phase_weight = torch.zeros_like(platoon_output[..., :1])
+        while phase_weight.ndim < platoon_output.ndim:
+            phase_weight = phase_weight.unsqueeze(-1)
+        return (1.0 - phase_weight) * platoon_output + phase_weight * hinge_output
+
+
+class PhaseConditionedMultiAgentMLP(nn.Module):
+    """Shared-trunk, dual-head multi-agent MLP with explicit phase conditioning.
+
+    The network uses a shared feature trunk and blends platoon / hinge-approach heads
+    with a phase signal extracted directly from observation features rather than a
+    learned gate. This keeps platoon behavior close to the baseline while giving the
+    hinge-approach phase a dedicated output head.
+    """
+
+    def __init__(
+        self,
+        n_agent_inputs: int,
+        n_agent_outputs: int,
+        n_agents: int,
+        *,
+        centralized: bool | None = None,
+        share_params: bool | None = None,
+        device: DEVICE_TYPING | None = None,
+        depth: int | None = None,
+        num_cells: Sequence | int | None = None,
+        head_hidden: int | None = None,
+        activation_class: type[nn.Module] | None = nn.Tanh,
+        phase_slice: slice | Sequence[int] | None = None,
+        phase_reduce: str = "max",
+    ):
+        super().__init__()
+        if centralized is None:
+            raise TypeError("centralized arg must be passed.")
+        if share_params is None:
+            raise TypeError("share_params arg must be passed.")
+        if n_agent_inputs is None:
+            raise TypeError("n_agent_inputs must be passed.")
+
+        self.n_agents = n_agents
+        self.n_agent_inputs = n_agent_inputs
+        self.n_agent_outputs = n_agent_outputs
+        self.share_params = share_params
+        self.centralized = centralized
+        self.depth = depth
+        self.num_cells = num_cells
+        self.head_hidden = head_hidden
+        self.activation_class = activation_class
+        self.phase_slice = phase_slice
+        self.phase_reduce = phase_reduce
+
+        input_dim = n_agent_inputs * n_agents if centralized else n_agent_inputs
+        network_count = 1 if share_params else n_agents
+        self.agent_networks = nn.ModuleList(
+            [
+                _PhaseConditionedAgentMLP(
+                    input_dim=input_dim,
+                    out_features=n_agent_outputs,
+                    device=device,
+                    depth=depth,
+                    num_cells=num_cells,
+                    head_hidden=head_hidden,
+                    activation_class=activation_class,
+                )
+                for _ in range(network_count)
+            ]
+        )
+
+    def _reduce_phase(self, phase_values: torch.Tensor, dim: int) -> torch.Tensor:
+        if self.phase_reduce == "mean":
+            return phase_values.mean(dim=dim, keepdim=True)
+        if self.phase_reduce == "max":
+            return phase_values.amax(dim=dim, keepdim=True)
+        raise ValueError(f"Unsupported phase_reduce '{self.phase_reduce}'.")
+
+    def _extract_phase_weight(self, obs: torch.Tensor) -> torch.Tensor:
+        if self.phase_slice is None:
+            return obs.new_zeros(*obs.shape[:-1], 1)
+        phase_tensor = obs[..., self.phase_slice]
+        phase_tensor = phase_tensor.reshape(*phase_tensor.shape[:-1], -1)
+        per_agent_phase = self._reduce_phase(phase_tensor, dim=-1).clamp(0.0, 1.0)
+        if self.centralized:
+            return per_agent_phase.mean(dim=-2, keepdim=False).clamp(0.0, 1.0)
+        return per_agent_phase
+
+    def forward(self, obs: torch.Tensor) -> torch.Tensor:
+        if obs.shape[-2] != self.n_agents:
+            raise ValueError(
+                f"Expected obs.shape[-2] == {self.n_agents}, got {obs.shape}."
+            )
+
+        phase_weight = self._extract_phase_weight(obs)
+        shared_inputs = obs.flatten(-2, -1) if self.centralized else obs
+
+        if self.share_params:
+            if self.centralized:
+                output = self.agent_networks[0](shared_inputs, phase_weight)
+                output = output.unsqueeze(-2).expand(
+                    *output.shape[:-1], self.n_agents, self.n_agent_outputs
+                )
+                return output
+            return self.agent_networks[0](shared_inputs, phase_weight)
+
+        outputs = []
+        for agent_idx, agent_network in enumerate(self.agent_networks):
+            agent_inputs = shared_inputs if self.centralized else shared_inputs[..., agent_idx, :]
+            agent_phase = phase_weight if self.centralized else phase_weight[..., agent_idx, :]
+            outputs.append(agent_network(agent_inputs, agent_phase).unsqueeze(-2))
+        return torch.cat(outputs, dim=-2)
+
+
 class MultiAgentConvNet(MultiAgentNetBase):
     """Multi-agent CNN.
 

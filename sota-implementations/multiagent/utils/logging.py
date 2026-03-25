@@ -67,6 +67,7 @@ def log_training(
     current_frames: int,
     total_frames: int,
     step: int,
+    extra_metrics: dict[str, float] | None = None,
 ):
     if ("next", "agents", "reward") not in sampling_td.keys(True, True):
         sampling_td.set(
@@ -107,8 +108,19 @@ def log_training(
         if hinge_status is not None:
             hinge_mask = hinge_status.to(torch.bool)
             non_hinge_mask = ~hinge_mask
+            hinge_count = hinge_mask.float().sum().item()
+            total_phase_count = float(hinge_mask.numel())
+            platoon_count = total_phase_count - hinge_count
             metrics_to_log["train/info/hinge_status_true_ratio"] = (
                 hinge_mask.float().mean().item()
+            )
+            metrics_to_log["train/info/collector_hinge_sample_count"] = hinge_count
+            metrics_to_log["train/info/collector_platoon_sample_count"] = platoon_count
+            metrics_to_log["train/info/collector_hinge_sample_ratio"] = (
+                hinge_count / max(total_phase_count, 1.0)
+            )
+            metrics_to_log["train/info/collector_platoon_sample_ratio"] = (
+                platoon_count / max(total_phase_count, 1.0)
             )
             for key, value in info_td.items():
                 if not isinstance(value, torch.Tensor) or not key.startswith("reward_"):
@@ -179,6 +191,8 @@ def log_training(
             "train/total_frames": total_frames,
         }
     )
+    if extra_metrics:
+        metrics_to_log.update(extra_metrics)
     try:
         env_total_step = sampling_td.get(("agents", "info", "env_total_step"))[:, :, 0, 0] #shape[batch_size, T]
         road_batch_id = sampling_td.get(("agents", "info", "road_batch_id"))[:, -1, 0, 0].to(torch.int64) #shape[batch_size]
