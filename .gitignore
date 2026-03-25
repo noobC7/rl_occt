@@ -197,3 +197,7 @@ main/
 
 # Additional cache directories
 .ruff_cache/
+
+*.png
+*.pdf
+*.csv
