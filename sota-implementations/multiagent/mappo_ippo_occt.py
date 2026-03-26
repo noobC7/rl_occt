@@ -561,7 +561,7 @@ def run_eval_export_chunk(
     if torch.cuda.is_available():
         torch.cuda.empty_cache()
 
-@hydra.main(version_base="1.1", config_path="config", config_name="mappo_occt_3_followers")
+@hydra.main(version_base="1.1", config_path="config", config_name="mappo_mlp_continues_act_change_penalty")
 def train(cfg: DictConfig):
     # Device
     cfg.train.device = "cpu" if not torch.cuda.device_count() else "cuda:0"
