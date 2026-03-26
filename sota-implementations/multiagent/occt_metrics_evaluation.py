@@ -31,11 +31,29 @@ ROAD_TYPE_BY_ID = {
     4: "s_curve",
     5: "s_curve",
 }
-METHOD_PLOT_ORDER = ["marl", "pid", "mppi"]
+METHOD_PLOT_ORDER = [
+    "marl_baseline",
+    "marl_full_obse",
+    "marl_lipsnet++",
+    "marl",
+    "pid",
+    "mppi",
+]
 METHOD_COLORS = {
+    "marl_baseline": "#1f77b4",
+    "marl_full_obse": "#ff7f0e",
+    "marl_lipsnet++": "#2ca02c",
     "marl": "#1f77b4",
     "pid": "#ff7f0e",
     "mppi": "#2ca02c",
+}
+METHOD_DISPLAY_NAMES = {
+    "marl_baseline": "MARL Baseline",
+    "marl_full_obse": "MARL Full Obse",
+    "marl_lipsnet++": "MARL LipsNet++",
+    "marl": "MARL",
+    "pid": "PID",
+    "mppi": "MPPI",
 }
 AGENT_COLORS = {
     0: "#7f7f7f",
@@ -74,6 +92,51 @@ def _safe_std(values: List[float]) -> float:
     if not values:
         return float("nan")
     return float(torch.tensor(values, dtype=torch.float32).std(unbiased=False).item())
+
+
+def _normalize_method_name(name: str) -> str:
+    return name.strip().lower()
+
+
+def _get_method_display_name(method: str) -> str:
+    return METHOD_DISPLAY_NAMES.get(method, method.upper())
+
+
+def _infer_rollout_method_name(input_path: Path, label: Optional[str] = None) -> str:
+    if label:
+        return _normalize_method_name(label)
+
+    path_text = input_path.as_posix().lower()
+    if "lipsnet++" in path_text or "lipsnetpp" in path_text or "lipsnet" in path_text:
+        return "marl_lipsnet++"
+    if (
+        "full_obse" in path_text
+        or "full-obse" in path_text
+        or "full_observation" in path_text
+        or "fullobse" in path_text
+    ):
+        return "marl_full_obse"
+    if "baseline" in path_text:
+        return "marl_baseline"
+    return "marl"
+
+
+def _resolve_method_name(requested: str, available_methods: Sequence[str]) -> str:
+    normalized = _normalize_method_name(requested)
+    available = list(dict.fromkeys(_normalize_method_name(method) for method in available_methods))
+    if normalized in available:
+        return normalized
+
+    prefix_matches = [method for method in available if method.startswith(f"{normalized}_")]
+    if len(prefix_matches) == 1:
+        return prefix_matches[0]
+    if len(prefix_matches) > 1:
+        raise ValueError(
+            f"Method '{requested}' is ambiguous. Matching methods: {sorted(prefix_matches)}"
+        )
+    raise ValueError(
+        f"Method '{requested}' not found in loaded inputs. Available methods: {sorted(available)}"
+    )
 
 
 def _squeeze_trailing_unit_dim(value: torch.Tensor) -> torch.Tensor:
@@ -177,6 +240,7 @@ def build_result_data_from_rollout(
     *,
     followers: List[int],
     dt: float,
+    method: str = "marl",
 ) -> Dict[str, Any]:
     trajectories = list(rollouts.unbind(0))
     episodes = []
@@ -202,7 +266,7 @@ def build_result_data_from_rollout(
         )
     unique_road_ids = sorted(set(road_ids))
     return _build_result_bundle(
-        method="marl",
+        method=method,
         episodes=episodes,
         dt=dt,
         followers=followers,
@@ -245,6 +309,30 @@ def _angle_diff_deg(rot: torch.Tensor, target_vel: torch.Tensor) -> Optional[flo
     dot = (agent_heading * target_heading).sum().clamp(-1.0, 1.0)
     angle_diff = torch.atan2(torch.abs(cross), dot) * (180.0 / torch.pi)
     return float(angle_diff.item())
+
+
+def _compute_signal_rate(signal: torch.Tensor, dt: float) -> torch.Tensor:
+    series = torch.as_tensor(signal, dtype=torch.float32).reshape(-1)
+    if series.numel() == 0:
+        return series
+    rate = torch.zeros_like(series)
+    if series.numel() > 1:
+        rate[1:] = (series[1:] - series[:-1]) / max(dt, 1e-6)
+    return rate
+
+
+def _compute_yaw_rate_from_rot(rot: torch.Tensor, dt: float) -> torch.Tensor:
+    rot_series = torch.as_tensor(rot, dtype=torch.float32).reshape(-1)
+    if rot_series.numel() == 0:
+        return rot_series
+    yaw_rate = torch.zeros_like(rot_series)
+    if rot_series.numel() > 1:
+        angle_delta = torch.atan2(
+            torch.sin(rot_series[1:] - rot_series[:-1]),
+            torch.cos(rot_series[1:] - rot_series[:-1]),
+        )
+        yaw_rate[1:] = angle_delta * (180.0 / torch.pi) / max(dt, 1e-6)
+    return yaw_rate
 
 
 def compute_rollout_metrics_from_object(
@@ -290,6 +378,9 @@ def compute_validation_metrics_from_object(
     platoon_back = []
     platoon_lateral_tracking_errors = []
     platoon_ttc_episode_mins = []
+    control_acc_episode_means = []
+    control_jerk_episode_means = []
+    control_steering_rate_episode_means = []
 
     hinge_times = []
     hinge_speed_diffs = []
@@ -349,6 +440,53 @@ def compute_validation_metrics_from_object(
             if "hinge_gate_angle_diff_deg" in info
             else None
         )
+
+        episode_acc_values = []
+        episode_jerk_values = []
+        episode_steering_rate_values = []
+        for follower_idx, agent_id in enumerate(resolved_followers):
+            active_control_mask = ~agent_hinge_status[:, follower_idx]
+            if not active_control_mask.any():
+                continue
+
+            if "act_acc" in info:
+                acc_series = _squeeze_trailing_unit_dim(
+                    info["act_acc"][:, agent_id]
+                ).float().reshape(-1)
+            else:
+                acc_series = _compute_signal_rate(speed_all[:, agent_id], resolved_dt)
+            jerk_series = _compute_signal_rate(acc_series, resolved_dt)
+            if "steering_rate_abs_deg" in info:
+                steering_rate_abs_series = _squeeze_trailing_unit_dim(
+                    info["steering_rate_abs_deg"][:, agent_id]
+                ).float().reshape(-1)
+            else:
+                steer_series = _squeeze_trailing_unit_dim(
+                    info["act_steer"][:, agent_id]
+                ).float().reshape(-1)
+                steering_rate_abs_series = (
+                    _compute_signal_rate(steer_series, resolved_dt).abs()
+                    * (180.0 / torch.pi)
+                )
+
+            episode_acc_values.append(
+                float(acc_series[active_control_mask].abs().mean().item())
+            )
+            episode_jerk_values.append(
+                float(jerk_series[active_control_mask].abs().mean().item())
+            )
+            episode_steering_rate_values.append(
+                float(steering_rate_abs_series[active_control_mask].mean().item())
+            )
+
+        if episode_acc_values:
+            control_acc_episode_means.append(float(np.mean(episode_acc_values)))
+        if episode_jerk_values:
+            control_jerk_episode_means.append(float(np.mean(episode_jerk_values)))
+        if episode_steering_rate_values:
+            control_steering_rate_episode_means.append(
+                float(np.mean(episode_steering_rate_values))
+            )
 
         platoon_mask = ~hinge_status
         if platoon_mask.any():
@@ -540,6 +678,16 @@ def compute_validation_metrics_from_object(
             else float("nan")
         ),
         "platoon_ttc_valid_episode_count": len(platoon_ttc_episode_mins),
+        "control_longitudinal_acc_abs_mean": _safe_mean(control_acc_episode_means),
+        "control_longitudinal_acc_abs_std": _safe_std(control_acc_episode_means),
+        "control_longitudinal_jerk_abs_mean": _safe_mean(control_jerk_episode_means),
+        "control_longitudinal_jerk_abs_std": _safe_std(control_jerk_episode_means),
+        "control_steering_rate_abs_deg_mean": _safe_mean(
+            control_steering_rate_episode_means
+        ),
+        "control_steering_rate_abs_deg_std": _safe_std(
+            control_steering_rate_episode_means
+        ),
         "hinge_time_sec_mean": _safe_mean(hinge_times),
         "hinge_time_sec_std": _safe_std(hinge_times),
         "hinge_instant_speed_diff_mean": _safe_mean(hinge_speed_diffs),
@@ -662,9 +810,16 @@ def _collect_method_datasets(
     forced_format: str,
     followers: Optional[List[int]],
     dt: Optional[float],
+    labels: Optional[Sequence[str]] = None,
 ) -> Dict[str, List[Dict[str, Any]]]:
     datasets_by_method: Dict[str, List[Dict[str, Any]]] = {}
-    for input_path in input_paths:
+    if labels is not None and len(labels) != len(input_paths):
+        raise ValueError(
+            f"--labels count ({len(labels)}) must match resolved input file count ({len(input_paths)})."
+        )
+
+    for input_index, input_path in enumerate(input_paths):
+        label = labels[input_index] if labels is not None else None
         loaded_object = torch.load(input_path, map_location="cpu", weights_only=False)
         source_format = forced_format
         if source_format == "auto":
@@ -672,14 +827,18 @@ def _collect_method_datasets(
 
         if source_format == "validation":
             dataset = loaded_object
+            if label is not None:
+                dataset = {**dataset, "method": _normalize_method_name(label)}
         else:
+            inferred_method = _infer_rollout_method_name(input_path, label)
             dataset = build_result_data_from_rollout(
                 loaded_object,
                 followers=followers or list(DEFAULT_FOLLOWERS),
                 dt=DEFAULT_DT if dt is None else dt,
+                method=inferred_method,
             )
 
-        method = str(dataset.get("method", "unknown"))
+        method = _normalize_method_name(str(dataset.get("method", "unknown")))
         datasets_by_method.setdefault(method, []).append(dataset)
     return datasets_by_method
 
@@ -856,14 +1015,15 @@ def _write_method_csv(report_dir: Path, method: str, report_groups: Dict[str, Li
 
 
 def _print_report_group(method: str, report_type: str, rows: List[Dict[str, Any]]) -> None:
-    print(f"\n##### {method} {report_type} #####")
+    display_name = _get_method_display_name(method)
+    print(f"\n##### {display_name} {report_type} #####")
     for row in rows:
         if report_type == "per_road":
-            label = f"{method} road_{row.get('requested_road_id')} {row.get('road_name')}"
+            label = f"{display_name} road_{row.get('requested_road_id')} {row.get('road_name')}"
         elif report_type == "road_type":
-            label = f"{method} road_type_{row.get('road_type')}"
+            label = f"{display_name} road_type_{row.get('road_type')}"
         else:
-            label = f"{method} overall"
+            label = f"{display_name} overall"
         print_metrics(label, row)
 
 
@@ -1027,9 +1187,37 @@ def _extract_acc_series(
     return acceleration.float()
 
 
+def _extract_jerk_series(
+    episode: Dict[str, Any], agent_id: int, *, dt: float
+) -> torch.Tensor:
+    info = episode["info"]
+    if "command_jerk" in info:
+        return _flatten_scalar_series(
+            _extract_agent_series(episode, "command_jerk", agent_id)
+        ).float()
+    acc_series = _extract_acc_series(episode, agent_id, dt=dt)
+    jerk = torch.diff(acc_series, prepend=acc_series[:1]) / dt
+    return jerk.float()
+
+
 def _extract_steer_series(episode: Dict[str, Any], agent_id: int) -> torch.Tensor:
     steer_series = _flatten_scalar_series(_extract_agent_series(episode, "act_steer", agent_id))
     return steer_series * (180.0 / np.pi)
+
+
+def _extract_steering_rate_series(
+    episode: Dict[str, Any], agent_id: int, *, dt: float
+) -> torch.Tensor:
+    info = episode["info"]
+    if "steering_rate_deg" in info:
+        return _flatten_scalar_series(
+            _extract_agent_series(episode, "steering_rate_deg", agent_id)
+        ).float()
+    steer_series_rad = _flatten_scalar_series(
+        _extract_agent_series(episode, "act_steer", agent_id)
+    ).float()
+    steering_rate = torch.diff(steer_series_rad, prepend=steer_series_rad[:1]) / dt
+    return steering_rate * (180.0 / np.pi)
 
 
 def _plot_single_metric_pdf(
@@ -1137,6 +1325,7 @@ def plot_representative_road_curves(
 
     for road_id in target_road_ids:
         episode = representative_episodes[road_id]
+        method_label = _get_method_display_name(method)
         num_agents = _infer_num_agents(episode)
         error_agent_ids = _filter_valid_agent_ids(resolved_followers, num_agents)
         hinge_agent_ids = _filter_valid_agent_ids(resolved_followers, num_agents)
@@ -1162,7 +1351,7 @@ def plot_representative_road_curves(
             _plot_mean_band_metric_pdf(
                 time_axis=time_axis,
                 value_matrix=longitudinal_values,
-                title=f"{method.upper()} 道路{road_id} 编队纵向误差",
+                title=f"{method_label} 道路{road_id} 编队纵向误差",
                 y_label="纵向误差 (m)",
                 output_path=longitudinal_path,
                 color="#9467bd",
@@ -1182,7 +1371,7 @@ def plot_representative_road_curves(
             _plot_mean_band_metric_pdf(
                 time_axis=time_axis,
                 value_matrix=lateral_values,
-                title=f"{method.upper()} 道路{road_id} 编队横向误差",
+                title=f"{method_label} 道路{road_id} 编队横向误差",
                 y_label="横向误差 (m)",
                 output_path=lateral_path,
                 color="#8c564b",
@@ -1235,14 +1424,14 @@ def plot_representative_road_curves(
             )
             _style_cn_axes(
                 ax,
-                title=f"{method.upper()} 道路{road_id} 铰接距离",
+                title=f"{method_label} 道路{road_id} 铰接距离",
                 y_label="铰接距离 (m)",
                 show_legend=False,
             )
         else:
             _style_cn_axes(
                 ax,
-                title=f"{method.upper()} 道路{road_id} 铰接距离",
+                title=f"{method_label} 道路{road_id} 铰接距离",
                 y_label="铰接距离 (m)",
                 show_legend=True,
             )
@@ -1278,7 +1467,7 @@ def plot_representative_road_curves(
         ax.set_ylim(-0.05, 1.05)
         _style_cn_axes(
             ax,
-            title=f"{method.upper()} 道路{road_id} 铰接状态",
+            title=f"{method_label} 道路{road_id} 铰接状态",
             y_label="铰接状态",
             show_legend=True,
         )
@@ -1333,7 +1522,7 @@ def plot_representative_road_curves(
                 color=spec["color"],
                 alpha=0.95,
             )
-        _style_cn_axes(ax, title=f"{method.upper()} 道路{road_id} 车辆速度", y_label="速度 (m/s)", show_legend=True)
+        _style_cn_axes(ax, title=f"{method_label} 道路{road_id} 车辆速度", y_label="速度 (m/s)", show_legend=True)
         _save_pdf_figure(fig, speed_path)
         saved_paths.append(speed_path)
 
@@ -1351,7 +1540,7 @@ def plot_representative_road_curves(
             _plot_single_metric_pdf(
                 time_axis=time_axis,
                 series_specs=acceleration_specs,
-                title=f"{method.upper()} 道路{road_id} 车辆加速度",
+                title=f"{method_label} 道路{road_id} 车辆加速度",
                 y_label="加速度 (m/s^2)",
                 output_path=acceleration_path,
             )
@@ -1370,7 +1559,7 @@ def plot_representative_road_curves(
             _plot_single_metric_pdf(
                 time_axis=time_axis,
                 series_specs=steering_specs,
-                title=f"{method.upper()} 道路{road_id} 前轮转角",
+                title=f"{method_label} 道路{road_id} 前轮转角",
                 y_label="前轮转角 (deg)",
                 output_path=steering_path,
             )
@@ -1395,6 +1584,9 @@ def _collect_method_distribution_stats(
     hinge_times: List[float] = []
     hinge_speed_diffs: List[float] = []
     hinge_gate_angle_diffs: List[float] = []
+    control_acc_values: List[float] = []
+    control_jerk_values: List[float] = []
+    control_steering_rate_values: List[float] = []
 
     for episode in method_episodes:
         info = episode["info"]
@@ -1425,6 +1617,48 @@ def _collect_method_distribution_stats(
             if "hinge_gate_angle_diff_deg" in info
             else None
         )
+
+        episode_acc_values = []
+        episode_jerk_values = []
+        episode_steering_rate_values = []
+        for follower_idx, agent_id in enumerate(resolved_followers):
+            active_control_mask = ~agent_hinge_status[:, follower_idx]
+            if not active_control_mask.any():
+                continue
+            if "act_acc" in info:
+                acc_series = _squeeze_trailing_unit_dim(
+                    info["act_acc"][:, agent_id]
+                ).float().reshape(-1)
+            else:
+                acc_series = _compute_signal_rate(speed_all[:, agent_id], resolved_dt)
+            jerk_series = _compute_signal_rate(acc_series, resolved_dt)
+            if "steering_rate_abs_deg" in info:
+                steering_rate_abs_series = _squeeze_trailing_unit_dim(
+                    info["steering_rate_abs_deg"][:, agent_id]
+                ).float().reshape(-1)
+            else:
+                steer_series = _squeeze_trailing_unit_dim(
+                    info["act_steer"][:, agent_id]
+                ).float().reshape(-1)
+                steering_rate_abs_series = (
+                    _compute_signal_rate(steer_series, resolved_dt).abs()
+                    * (180.0 / torch.pi)
+                )
+            episode_acc_values.append(
+                float(acc_series[active_control_mask].abs().mean().item())
+            )
+            episode_jerk_values.append(
+                float(jerk_series[active_control_mask].abs().mean().item())
+            )
+            episode_steering_rate_values.append(
+                float(steering_rate_abs_series[active_control_mask].mean().item())
+            )
+        if episode_acc_values:
+            control_acc_values.append(float(np.mean(episode_acc_values)))
+        if episode_jerk_values:
+            control_jerk_values.append(float(np.mean(episode_jerk_values)))
+        if episode_steering_rate_values:
+            control_steering_rate_values.append(float(np.mean(episode_steering_rate_values)))
 
         platoon_mask = ~hinge_status
         episode_ttc_candidates = []
@@ -1524,6 +1758,9 @@ def _collect_method_distribution_stats(
         "hinge_time": hinge_times,
         "hinge_speed_diff": hinge_speed_diffs,
         "hinge_gate_angle": hinge_gate_angle_diffs,
+        "control_acc": control_acc_values,
+        "control_jerk": control_jerk_values,
+        "control_steering_rate": control_steering_rate_values,
     }
 
 
@@ -1538,7 +1775,7 @@ def _plot_boxplot_metric_pdf(
     if not valid_items:
         raise ValueError(f"{title} 没有可绘制的数据。")
 
-    methods = [method.upper() for method, _ in valid_items]
+    methods = [_get_method_display_name(method) for method, _ in valid_items]
     values = [series for _, series in valid_items]
     colors = [_get_method_color(method) for method, _ in valid_items]
 
@@ -1585,7 +1822,8 @@ def _plot_grouped_scaled_bar_metrics_pdf(
         len(methods),
     )
 
-    fig, ax = plt.subplots(1, 1, figsize=(3, 2), constrained_layout=True)
+    fig_width = max(3.4, 0.95 * len(metric_method_value_maps) + 1.8)
+    fig, ax = plt.subplots(1, 1, figsize=(fig_width, 2), constrained_layout=True)
     legend_handles = []
     legend_labels = []
 
@@ -1621,7 +1859,7 @@ def _plot_grouped_scaled_bar_metrics_pdf(
             alpha=0.78,
             edgecolor="white",
             linewidth=0.6,
-            label=method.upper(),
+            label=_get_method_display_name(method),
         )
         if method_index == 0:
             legend_handles.extend(bars)
@@ -1660,10 +1898,10 @@ def _plot_grouped_scaled_bar_metrics_pdf(
     ax.margins(x=0.08)
     ax.legend(
         handles=[
-            plt.Rectangle((0, 0), 1, 1, facecolor=_get_method_color(method), alpha=0.78, edgecolor="white", linewidth=0.6)
-            for method in methods
-        ],
-        labels=[method.upper() for method in methods],
+                    plt.Rectangle((0, 0), 1, 1, facecolor=_get_method_color(method), alpha=0.78, edgecolor="white", linewidth=0.6)
+                    for method in methods
+                ],
+        labels=[_get_method_display_name(method) for method in methods],
         loc="upper center",
         ncol=len(methods),
         fontsize=font_size_legend,
@@ -1731,6 +1969,27 @@ def plot_overall_metric_bars(
                     "group_label": "铰接时间 (s)",
                     "method_value_map": {
                         method: stats["hinge_time"]
+                        for method, stats in stats_by_method.items()
+                    },
+                },
+                {
+                    "group_label": "纵向加速度",
+                    "method_value_map": {
+                        method: stats["control_acc"]
+                        for method, stats in stats_by_method.items()
+                    },
+                },
+                {
+                    "group_label": "纵向Jerk",
+                    "method_value_map": {
+                        method: stats["control_jerk"]
+                        for method, stats in stats_by_method.items()
+                    },
+                },
+                {
+                    "group_label": "转角变化率",
+                    "method_value_map": {
+                        method: stats["control_steering_rate"]
                         for method, stats in stats_by_method.items()
                     },
                 },
@@ -1879,10 +2138,10 @@ def plot_method_transition_comparison(
             hinge_dis.numpy(),
             color=_get_method_color(method),
             linewidth=2.2,
-            label=method,
+            label=_get_method_display_name(method),
         )[0]
         line_handles.append(line)
-        line_labels.append(method)
+        line_labels.append(_get_method_display_name(method))
     if background_handle is not None:
         line_handles.append(background_handle)
         line_labels.append("hinge available")
@@ -1916,10 +2175,10 @@ def plot_method_transition_comparison(
             act_steer.numpy(),
             color=_get_method_color(method),
             linewidth=2.2,
-            label=method,
+            label=_get_method_display_name(method),
         )[0]
         line_handles.append(line)
-        line_labels.append(method)
+        line_labels.append(_get_method_display_name(method))
     if background_handle is not None:
         line_handles.append(background_handle)
         line_labels.append("hinge available")
@@ -2079,10 +2338,12 @@ def main() -> None:
         forced_format=args.format,
         followers=args.followers,
         dt=args.dt,
+        labels=args.labels,
     )
     results_to_save = {}
 
-    for method, datasets in sorted(datasets_by_method.items()):
+    for method in _ordered_methods(list(datasets_by_method.keys())):
+        datasets = datasets_by_method[method]
         report_groups = _build_method_reports(
             datasets,
             method=method,
@@ -2096,12 +2357,7 @@ def main() -> None:
         print(f"Saved CSV: {csv_path}")
 
     if args.plot_method is not None:
-        plot_method = args.plot_method.lower()
-        if plot_method not in datasets_by_method:
-            raise ValueError(
-                f"Method '{plot_method}' not found in loaded inputs. "
-                f"Available methods: {sorted(datasets_by_method.keys())}"
-            )
+        plot_method = _resolve_method_name(args.plot_method, datasets_by_method.keys())
         saved_plot_paths = plot_representative_road_curves(
             datasets_by_method[plot_method],
             method=plot_method,
@@ -2125,7 +2381,10 @@ def main() -> None:
 
     if args.plot_transition_comparison:
         comparison_methods = (
-            [method.lower() for method in args.comparison_methods]
+            [
+                _resolve_method_name(method, datasets_by_method.keys())
+                for method in args.comparison_methods
+            ]
             if args.comparison_methods is not None
             else None
         )

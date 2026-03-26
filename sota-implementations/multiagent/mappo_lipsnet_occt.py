@@ -92,6 +92,17 @@ def maybe_int(value):
     return int(value)
 
 
+def maybe_int_list(value):
+    if value is None:
+        return None
+    if isinstance(value, str):
+        normalized = value.strip().lower()
+        if normalized in {"none", "null", ""}:
+            return None
+        return [int(item.strip()) for item in value.split(",") if item.strip()]
+    return [int(item) for item in value]
+
+
 class LipsNetAgent(nn.Module):
     def __init__(
         self,
@@ -106,6 +117,11 @@ class LipsNetAgent(nn.Module):
         kernel_scale: float = 0.02,
         norm_layer_type: str = "none",
         jacobian_samples: int | None = None,
+        action_dim: int | None = None,
+        controller_mode: str = "single_head",
+        steering_action_index: int = -1,
+        phase_feature_indices: list[int] | None = None,
+        phase_weight_scale: float = 1.0,
     ) -> None:
         super().__init__()
         self.obs_len = obs_len
@@ -114,6 +130,13 @@ class LipsNetAgent(nn.Module):
         self.lambda_k = float(lambda_k)
         self.jacobian_samples = jacobian_samples
         self.norm_layer_type = norm_layer_type
+        self.controller_mode = controller_mode
+        self.action_dim = action_dim
+        self.steering_action_index = steering_action_index
+        self.phase_feature_indices = phase_feature_indices or []
+        self.phase_weight_scale = float(phase_weight_scale)
+        if self.phase_weight_scale <= 0.0:
+            raise ValueError("phase_weight_scale must be positive.")
 
         if norm_layer_type == "batch_norm":
             self.norm_layer = nn.BatchNorm1d(obs_dim)
@@ -136,12 +159,43 @@ class LipsNetAgent(nn.Module):
                 dim=2,
             )
         )
-        mlp_sizes = [obs_dim, *hidden_sizes, out_features]
-        self.mlp = build_mlp(
-            mlp_sizes,
-            activation_class=activation_class,
-            output_activation_class=None,
-        )
+        if controller_mode == "single_head":
+            mlp_sizes = [obs_dim, *hidden_sizes, out_features]
+            self.mlp = build_mlp(
+                mlp_sizes,
+                activation_class=activation_class,
+                output_activation_class=None,
+            )
+            self.controller_trunk = None
+            self.platoon_head = None
+            self.hinge_head = None
+        elif controller_mode == "phase_blend":
+            if action_dim is None:
+                raise ValueError("phase_blend controller requires action_dim.")
+            if out_features != 2 * action_dim:
+                raise ValueError(
+                    "phase_blend controller expects out_features == 2 * action_dim "
+                    f"for NormalParamExtractor, got out_features={out_features}, action_dim={action_dim}."
+                )
+            if hidden_sizes:
+                self.controller_trunk = build_mlp(
+                    [obs_dim, *hidden_sizes],
+                    activation_class=activation_class,
+                    output_activation_class=None,
+                )
+                controller_hidden_dim = hidden_sizes[-1]
+            else:
+                self.controller_trunk = nn.Identity()
+                controller_hidden_dim = obs_dim
+            self.platoon_head = nn.Linear(controller_hidden_dim, out_features)
+            self.hinge_head = nn.Linear(controller_hidden_dim, out_features)
+            nn.init.xavier_normal_(self.platoon_head.weight)
+            nn.init.zeros_(self.platoon_head.bias)
+            nn.init.xavier_normal_(self.hinge_head.weight)
+            nn.init.zeros_(self.hinge_head.bias)
+            self.mlp = None
+        else:
+            raise ValueError(f"Unsupported controller_mode '{controller_mode}'.")
         self._clear_last_stats()
 
     def _clear_last_stats(self) -> None:
@@ -149,6 +203,7 @@ class LipsNetAgent(nn.Module):
         self._last_filter_penalty = None
         self._last_jacobian_penalty = None
         self._last_jacobian_norm = None
+        self._last_phase_weight = None
 
     def _zero_scalar(self, ref: torch.Tensor) -> torch.Tensor:
         return ref.new_zeros(())
@@ -160,8 +215,52 @@ class LipsNetAgent(nn.Module):
             return self.norm_layer(history.reshape(-1, self.obs_dim)).reshape(history.shape)
         return self.norm_layer(history)
 
-    def _controller_forward(self, features: torch.Tensor) -> torch.Tensor:
-        return self.mlp(features)
+    def _extract_phase_weight(self, history_obs: torch.Tensor) -> torch.Tensor | None:
+        if self.controller_mode != "phase_blend" or not self.phase_feature_indices:
+            return None
+        phase_signal = history_obs[..., :, self.phase_feature_indices]
+        phase_signal = phase_signal.reshape(-1, self.obs_len, len(self.phase_feature_indices))
+        phase_value = phase_signal.mean(dim=-2).amax(dim=-1, keepdim=True)
+        return (phase_value / self.phase_weight_scale).clamp(0.0, 1.0)
+
+    def _broadcast_phase_weight(
+        self, phase_weight: torch.Tensor | None, target: torch.Tensor
+    ) -> torch.Tensor:
+        if phase_weight is None:
+            return target.new_zeros(*target.shape[:-1], 1)
+        while phase_weight.ndim < target.ndim:
+            phase_weight = phase_weight.unsqueeze(-1)
+        return phase_weight
+
+    def _controller_forward(
+        self, features: torch.Tensor, phase_weight: torch.Tensor | None = None
+    ) -> torch.Tensor:
+        if self.controller_mode == "single_head":
+            return self.mlp(features)
+
+        trunk_features = self.controller_trunk(features)
+        platoon_output = self.platoon_head(trunk_features)
+        hinge_output = self.hinge_head(trunk_features)
+        mixed_output = platoon_output.clone()
+        steer_idx = self.steering_action_index
+        if steer_idx < 0:
+            steer_idx = self.action_dim + steer_idx
+        if not 0 <= steer_idx < self.action_dim:
+            raise ValueError(
+                f"steering_action_index resolved to {steer_idx}, but action_dim={self.action_dim}."
+            )
+        steer_loc_slice = slice(steer_idx, steer_idx + 1)
+        steer_scale_slice = slice(self.action_dim + steer_idx, self.action_dim + steer_idx + 1)
+        blend_weight = self._broadcast_phase_weight(phase_weight, platoon_output)
+        mixed_output[..., steer_loc_slice] = (
+            (1.0 - blend_weight) * platoon_output[..., steer_loc_slice]
+            + blend_weight * hinge_output[..., steer_loc_slice]
+        )
+        mixed_output[..., steer_scale_slice] = (
+            (1.0 - blend_weight) * platoon_output[..., steer_scale_slice]
+            + blend_weight * hinge_output[..., steer_scale_slice]
+        )
+        return mixed_output
 
     def _compute_filter_penalty(self, ref: torch.Tensor) -> torch.Tensor:
         if self.lambda_t == 0.0:
@@ -169,13 +268,17 @@ class LipsNetAgent(nn.Module):
         return self.lambda_t * (self.filter_kernel.square().sum())
 
     def _compute_jacobian_penalty(
-        self, x_result: torch.Tensor, ref: torch.Tensor
+        self,
+        x_result: torch.Tensor,
+        ref: torch.Tensor,
+        phase_weight: torch.Tensor | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         if self.lambda_k == 0.0:
             zero = self._zero_scalar(ref)
             return zero, zero
 
         jacobian_inputs = x_result.detach()
+        jacobian_phase_weight = phase_weight.detach() if phase_weight is not None else None
         if (
             self.jacobian_samples is not None
             and jacobian_inputs.shape[0] > self.jacobian_samples
@@ -185,8 +288,20 @@ class LipsNetAgent(nn.Module):
                 device=jacobian_inputs.device,
             )[: self.jacobian_samples]
             jacobian_inputs = jacobian_inputs[sampled_indices]
+            if jacobian_phase_weight is not None:
+                jacobian_phase_weight = jacobian_phase_weight[sampled_indices]
 
-        jacobian = vmap(jacrev(self._controller_forward))(jacobian_inputs)
+        if jacobian_phase_weight is None:
+            jacobian = vmap(jacrev(lambda inputs: self._controller_forward(inputs)))(
+                jacobian_inputs
+            )
+        else:
+            jacobian = vmap(
+                jacrev(
+                    lambda inputs, weight: self._controller_forward(inputs, weight),
+                    argnums=0,
+                )
+            )(jacobian_inputs, jacobian_phase_weight)
         jacobian_norm = torch.norm(jacobian, 2, dim=(-2, -1)).mean()
         return self.lambda_k * jacobian_norm, jacobian_norm
 
@@ -213,7 +328,14 @@ class LipsNetAgent(nn.Module):
             norm="ortho",
         )
         filtered_features = filtered_history[..., 0, :]
-        output = self.mlp(filtered_features).reshape(*history_obs.shape[:-2], -1)
+        phase_weight = self._extract_phase_weight(history_obs)
+        if phase_weight is not None:
+            self._last_phase_weight = phase_weight.mean().detach()
+        else:
+            self._last_phase_weight = None
+        output = self._controller_forward(filtered_features, phase_weight).reshape(
+            *history_obs.shape[:-2], -1
+        )
 
         compute_regularization = (
             self.training
@@ -232,6 +354,7 @@ class LipsNetAgent(nn.Module):
         jacobian_penalty, jacobian_norm = self._compute_jacobian_penalty(
             filtered_features,
             output,
+            phase_weight=phase_weight,
         )
         self._last_filter_penalty = filter_penalty
         self._last_jacobian_penalty = jacobian_penalty
@@ -245,6 +368,7 @@ class LipsNetAgent(nn.Module):
             "filter_penalty": self._last_filter_penalty,
             "jacobian_penalty": self._last_jacobian_penalty,
             "jacobian_norm": self._last_jacobian_norm,
+            "phase_weight_mean": self._last_phase_weight,
         }
         self._clear_last_stats()
         return stats
@@ -268,6 +392,11 @@ class LipsNetMultiAgentBackbone(nn.Module):
         kernel_scale: float = 0.02,
         norm_layer_type: str = "none",
         jacobian_samples: int | None = None,
+        action_dim: int | None = None,
+        controller_mode: str = "single_head",
+        steering_action_index: int = -1,
+        phase_feature_indices: list[int] | None = None,
+        phase_weight_scale: float = 1.0,
     ) -> None:
         super().__init__()
         self.obs_len = obs_len
@@ -290,6 +419,11 @@ class LipsNetMultiAgentBackbone(nn.Module):
                     kernel_scale=kernel_scale,
                     norm_layer_type=norm_layer_type,
                     jacobian_samples=jacobian_samples,
+                    action_dim=action_dim,
+                    controller_mode=controller_mode,
+                    steering_action_index=steering_action_index,
+                    phase_feature_indices=phase_feature_indices,
+                    phase_weight_scale=phase_weight_scale,
                 ).to(device)
                 for _ in range(network_count)
             ]
@@ -301,6 +435,7 @@ class LipsNetMultiAgentBackbone(nn.Module):
         self._last_filter_penalty = None
         self._last_jacobian_penalty = None
         self._last_jacobian_norm = None
+        self._last_phase_weight = None
 
     def _zero_scalar(self, ref: torch.Tensor) -> torch.Tensor:
         return ref.new_zeros(())
@@ -326,6 +461,7 @@ class LipsNetMultiAgentBackbone(nn.Module):
         self._last_filter_penalty = _average("filter_penalty")
         self._last_jacobian_penalty = _average("jacobian_penalty")
         self._last_jacobian_norm = _average("jacobian_norm")
+        self._last_phase_weight = _average("phase_weight_mean")
 
     def forward(self, obs: torch.Tensor) -> torch.Tensor:
         if obs.shape[-3] != self.n_agents:
@@ -367,6 +503,7 @@ class LipsNetMultiAgentBackbone(nn.Module):
             "filter_penalty": self._last_filter_penalty,
             "jacobian_penalty": self._last_jacobian_penalty,
             "jacobian_norm": self._last_jacobian_norm,
+            "phase_weight_mean": self._last_phase_weight,
         }
         self._clear_last_stats()
         return stats
@@ -413,7 +550,15 @@ def configure_history_observation(cfg: DictConfig) -> None:
         cfg.model.use_phase_conditioned_network = False
 
 
-@hydra.main(version_base="1.1", config_path="config", config_name="mappo_lipsnet_occt")
+def infer_default_phase_feature_indices(cfg: DictConfig) -> list[int]:
+    n_points_short_term = int(cfg.env.scenario.get("n_points_short_term", 4))
+    mask_ref_v = bool(cfg.env.scenario.get("mask_ref_v", False))
+    self_ref_dim = n_points_short_term * (2 if mask_ref_v else 3)
+    hinge_group_offset = 2 + 1 + 1 + 1 + 1 + self_ref_dim
+    return [hinge_group_offset + 3 + 4 * idx for idx in range(n_points_short_term)]
+
+
+@hydra.main(version_base="1.1", config_path="config", config_name="mappo_lipsnet_continues_baseline")
 def train(cfg: DictConfig):
     cfg.train.device = "cpu" if not torch.cuda.device_count() else "cuda:0"
     cfg.env.device = cfg.train.device
@@ -455,6 +600,14 @@ def train(cfg: DictConfig):
     critic_depth = int(cfg.model.get("critic_depth", 2))
     critic_num_cells = cfg.model.get("critic_num_cells", 688)
     jacobian_samples = maybe_int(cfg.model.get("lipsnet_jacobian_samples", None))
+    controller_mode = str(cfg.model.get("lipsnet_controller_mode", "single_head"))
+    steering_action_index = int(cfg.model.get("lipsnet_steering_action_index", -1))
+    phase_weight_scale = float(cfg.model.get("lipsnet_phase_weight_scale", 1.0))
+    phase_feature_indices = maybe_int_list(
+        cfg.model.get("lipsnet_phase_feature_indices", None)
+    )
+    if controller_mode == "phase_blend" and phase_feature_indices is None:
+        phase_feature_indices = infer_default_phase_feature_indices(cfg)
 
     obs_spec_shape = tuple(
         env.full_observation_spec_unbatched["agents", "observation"].shape
@@ -489,6 +642,11 @@ def train(cfg: DictConfig):
         kernel_scale=float(cfg.model.get("lipsnet_kernel_scale", 0.02)),
         norm_layer_type=str(cfg.model.get("lipsnet_norm_layer_type", "none")),
         jacobian_samples=jacobian_samples,
+        action_dim=action_dim,
+        controller_mode=controller_mode,
+        steering_action_index=steering_action_index,
+        phase_feature_indices=phase_feature_indices,
+        phase_weight_scale=phase_weight_scale,
     )
     actor_module = LipsNetActorModule(actor_backbone)
     policy = ProbabilisticActor(
@@ -721,6 +879,11 @@ def train(cfg: DictConfig):
                             "lipsnet_jacobian_norm",
                             lipsnet_stats["jacobian_norm"].detach(),
                         )
+                    if lipsnet_stats["phase_weight_mean"] is not None:
+                        training_summary.set(
+                            "lipsnet_phase_weight_mean",
+                            lipsnet_stats["phase_weight_mean"].detach(),
+                        )
                 training_summary.set(
                     "lipsnet_obs_len",
                     torch.tensor(float(obs_len), device=loss_value.device),
@@ -728,6 +891,13 @@ def train(cfg: DictConfig):
                 training_summary.set(
                     "lipsnet_obs_dim",
                     torch.tensor(float(obs_dim), device=loss_value.device),
+                )
+                training_summary.set(
+                    "lipsnet_controller_mode",
+                    torch.tensor(
+                        1.0 if controller_mode == "phase_blend" else 0.0,
+                        device=loss_value.device,
+                    ),
                 )
                 training_tds.append(training_summary.detach())
 

@@ -1,0 +1,124 @@
+seed: 40
+
+env:
+  max_steps: None
+  eval_max_steps: 1500
+  scenario_name: "occt_scenario"
+  scenario:
+    enable_obs_audit: False
+    viewer_zoom: 20.0
+    resolution_factor: 3
+    n_agents: 5
+    task_class: 1
+    is_rand_arc_pos: False
+    mask_ref_v: False
+    cargo_half_width: 2
+    threshold_near_other_agents_c2c_high: 6
+    max_speed: 8
+    init_vel_std: 1
+    still_space: 6
+    init_arc_pos: 0.0
+    use_center_frenet_ref: True
+    n_nearing_agents_observed: 2
+    use_history_observation: True
+    history_obs_len: 10
+    n_observed_steps: 10
+    n_stored_steps: 10
+    history_obs_dim: null
+    hinge_short_term_status_mode: boundary_margin
+    # reward weights
+    reward_progress: 5.0
+    reward_vel: 0
+    reward_goal: 0
+    reward_platoon_vel: 20
+    reward_platoon_space: 20
+    reward_platoon_ref: 50
+    reward_platoon_heading: 10
+
+    reward_hinge: 20000
+    reward_hinge_vel: 20
+    reward_hinge_space: 20
+    reward_hinge_ref: 20
+    reward_approach_hinge: 5
+
+    penalty_goal_incomplete_hinge: -300
+    goal_incomplete_hinge_penalty_mode: constant
+    penalty_near_boundary: -200
+    penalty_near_other_agents: -200
+    penalty_change_steering: -0.0
+    penalty_change_acc: -0.0
+    penalty_collide_with_agents: -400
+    penalty_outside_boundaries: -400
+    penalty_hinge_time_cost: -80
+    penalty_backward: -400
+  device: ???
+  vmas_envs: 300
+
+model:
+  shared_parameters: True
+  centralised_critic: True
+  use_phase_conditioned_network: False
+  actor_depth: 2
+  actor_num_cells: 344
+  critic_depth: 2
+  critic_num_cells: 688
+  lipsnet_controller_mode: phase_blend
+  lipsnet_lambda_t: 5e-4
+  lipsnet_lambda_k: 2e-3
+  lipsnet_kernel_scale: 0.02
+  lipsnet_norm_layer_type: none
+  lipsnet_jacobian_samples: 256
+  lipsnet_phase_feature_indices: null
+  lipsnet_phase_weight_scale: 1.0
+  lipsnet_steering_action_index: -1
+
+collector:
+  frames_per_batch: 60_000
+  n_iters: 300
+  total_frames: ???
+
+buffer:
+  memory_size: ???
+
+loss:
+  gamma: 0.99
+  lmbda: 0.95
+  entropy_eps: 0.05
+  clip_epsilon: 0.2
+
+adaptive_weighting:
+  enabled: False
+  ema_tau: 0.1
+  initial_hinge_weight: 0.0
+  min_platoon_weight: 0.2
+  max_hinge_weight: 0.8
+  collision_high_threshold: 0.20
+  collision_low_threshold: 0.08
+  platoon_space_error_threshold: 0.60
+  platoon_ref_error_threshold: 0.20
+  all_hinged_target: 0.85
+  all_hinged_plateau_delta: 0.01
+  plateau_patience: 3
+  hinge_weight_step: 0.05
+  collision_weight_step: 0.10
+
+train:
+  num_epochs: 45
+  minibatch_size: 4096
+  lr: 5e-5
+  max_grad_norm: 40.0
+  device: ???
+  resume_mode: fine_tune
+  resume_from_checkpoint: None
+
+eval:
+  evaluation_interval: 10
+  evaluation_episodes: 6
+  render_batch_size: 6
+
+logger:
+  backend: swanlab
+  project_name: "MAPPO_OCCT_TWO_STAGE"
+  group_name: "lipsnet_phase_blending_history10"
+  resume_swanlab_id: None
+  mode: cloud
