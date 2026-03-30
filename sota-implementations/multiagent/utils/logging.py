@@ -50,6 +50,7 @@ def init_logging(cfg, model_name: str):
             "mode": cfg.logger.mode,
             "id": cfg.logger.resume_swanlab_id if resume else None,
             "resume": resume,
+            "description":cfg.logger.description,
         },
     )
     logger.log_hparams(cfg)
