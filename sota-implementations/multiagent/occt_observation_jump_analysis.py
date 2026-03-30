@@ -63,7 +63,7 @@ def _build_flat_observation_layout(cfg: dict[str, Any]) -> list[dict[str, Any]]:
                 ("self_distance_to_left_boundary", 1),
                 ("self_distance_to_right_boundary", 1),
                 ("self_error_vel", 2),
-                ("self_error_space", 2),
+                ("self_platoon_error_space", 2),
             ]
         )
     else:
@@ -73,7 +73,7 @@ def _build_flat_observation_layout(cfg: dict[str, Any]) -> list[dict[str, Any]]:
                 ("self_distance_to_left_boundary", 1),
                 ("self_distance_to_right_boundary", 1),
                 ("self_error_vel", 2),
-                ("self_error_space", 2),
+                ("self_platoon_error_space", 2),
             ]
         )
 
