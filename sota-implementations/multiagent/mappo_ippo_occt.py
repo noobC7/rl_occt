@@ -5,7 +5,7 @@ import torch
 from omegaconf import DictConfig
 from torch import nn
 from tqdm import tqdm
-from tensordict import TensorDict
+from tensordict import TensorDict, TensorDictBase
 from tensordict.nn import TensorDictModule
 from tensordict.nn.distributions import NormalParamExtractor
 from torchrl._utils import logger as torchrl_logger
@@ -100,32 +100,11 @@ def _safe_info_get(td, info_key: str):
     return value
 
 
-def infer_observation_group_slices(
-    vmas_env: VmasEnv, agent_index: int = 0
-) -> dict[str, slice]:
-    agent_index = min(max(agent_index, 0), vmas_env.n_agents - 1)
-    td = vmas_env.reset()
-    scenario = vmas_env.scenario
-    _, obs_self_groups = scenario.observe_self(agent_index, return_groups=True)
-    _, obs_other_groups = scenario.observe_other_agents_platoon(
-        agent_index, return_groups=True
-    )
-    total_obs_dim = td["agents", "observation"].shape[-1]
-
-    group_slices = {}
-    cursor = 0
-    for name, tensor in [*obs_self_groups, *obs_other_groups]:
-        if tensor is None:
-            continue
-        next_cursor = cursor + int(tensor.shape[-1])
-        group_slices[name] = slice(cursor, next_cursor)
-        cursor = next_cursor
-
-    if cursor > total_obs_dim:
-        raise RuntimeError(
-            f"Observation groups exceed total observation dim: {cursor} > {total_obs_dim}."
-        )
-    return group_slices
+def _safe_observation_field_get(td, field_key: str):
+    value = _safe_get(td, ("agents", "observation", field_key))
+    if value is None:
+        value = _safe_get(td, ("next", "agents", "observation", field_key))
+    return value
 
 
 def infer_agent_advantage_exclude_dims(
@@ -155,7 +134,9 @@ def log_advantage_layout(tag: str, td, loss_module, n_agents: int) -> None:
     advantage = _safe_get(td, advantage_key)
     observation = _safe_get(td, ("agents", "observation"))
     reward = _safe_get(td, ("next", "agents", "reward"))
-    hinge_status = _safe_get(td, ("agents", "info", "hinge_status"))
+    hinge_status = _safe_observation_field_get(td, "self_hinge_status")
+    if hinge_status is None:
+        hinge_status = _safe_get(td, ("agents", "info", "hinge_status"))
     print(
         f"[PPO][{tag}] td.batch_size={tuple(td.batch_size)}, "
         f"adv_key={advantage_key}, "
@@ -170,14 +151,18 @@ def log_advantage_layout(tag: str, td, loss_module, n_agents: int) -> None:
 
 def extract_training_phase_masks(
     td,
-    hinge_key: str = "hinge_status",
+    hinge_key: str = "self_hinge_status",
     agent_hinged_key: str = "agent_hinge_status",
 ) -> tuple[torch.Tensor, torch.Tensor]:
-    hinge_status = _safe_info_get(td, hinge_key)
+    hinge_status = _safe_observation_field_get(td, hinge_key)
+    if hinge_status is None and hinge_key == "self_hinge_status":
+        hinge_status = _safe_info_get(td, "hinge_status")
+    elif hinge_status is None:
+        hinge_status = _safe_info_get(td, hinge_key)
     agent_hinged = _safe_info_get(td, agent_hinged_key)
     if hinge_status is None or agent_hinged is None:
         raise KeyError(
-            "Could not find hinge_status/agent_hinge_status in env info. "
+            "Could not find self_hinge_status(or fallback hinge_status)/agent_hinge_status. "
             "Phase-conditioned training requires these signals."
         )
     hinge_status = _ensure_phase_mask(hinge_status)
@@ -488,6 +473,773 @@ def build_training_summary(
     return loss_value, summary
 
 
+def build_mlp(
+    in_features: int,
+    out_features: int,
+    hidden_sizes: list[int],
+    activation_class: type[nn.Module] = nn.Tanh,
+    *,
+    activate_last: bool = False,
+) -> nn.Sequential:
+    sizes = [in_features, *hidden_sizes, out_features]
+    layers: list[nn.Module] = []
+    for idx in range(len(sizes) - 1):
+        layers.append(nn.Linear(sizes[idx], sizes[idx + 1]))
+        is_last_layer = idx == len(sizes) - 2
+        if not is_last_layer or activate_last:
+            layers.append(activation_class())
+    return nn.Sequential(*layers)
+
+
+def resolve_hidden_sizes(
+    depth: int,
+    num_cells: int | list[int] | tuple[int, ...],
+) -> list[int]:
+    if isinstance(num_cells, int):
+        return [num_cells for _ in range(depth)]
+    hidden_sizes = list(num_cells)
+    if len(hidden_sizes) != depth:
+        raise ValueError(
+            f"Expected {depth} hidden layers, got {len(hidden_sizes)} from num_cells={num_cells}."
+        )
+    return hidden_sizes
+
+
+def _normalize_optional_cfg_value(value):
+    if isinstance(value, str) and value.lower() in {"none", "null"}:
+        return None
+    return value
+
+
+def configure_advanced_model_inputs(cfg: DictConfig) -> None:
+    is_actor_retentive = bool(cfg.model.get("is_actor_retentive", False))
+    is_critic_bi_head = bool(cfg.model.get("is_critic_bi_head", False))
+
+    if is_actor_retentive:
+        if not bool(cfg.env.scenario.get("use_history_observation", False)):
+            torchrl_logger.warning(
+                "Retentive actor requires raw history observations. "
+                "Overriding env.scenario.use_history_observation=True."
+            )
+            cfg.env.scenario.use_history_observation = True
+        if _normalize_optional_cfg_value(
+            cfg.env.scenario.get("history_obs_dim", None)
+        ) is not None:
+            torchrl_logger.warning(
+                "Retentive actor expects raw per-step observation features. "
+                "Overriding env.scenario.history_obs_dim=None."
+            )
+            cfg.env.scenario.history_obs_dim = None
+
+    if (is_actor_retentive or is_critic_bi_head) and bool(
+        cfg.model.get("use_phase_conditioned_network", False)
+    ):
+        torchrl_logger.warning(
+            "Retentive actor / phase-aware critic supersede the older "
+            "phase-conditioned MLP path. Overriding model.use_phase_conditioned_network=False."
+        )
+        cfg.model.use_phase_conditioned_network = False
+
+    if is_critic_bi_head and not bool(cfg.model.get("centralised_critic", True)):
+        torchrl_logger.warning(
+            "Phase-aware critic requires a centralized critic. "
+            "Overriding model.centralised_critic=True."
+        )
+        cfg.model.centralised_critic = True
+
+
+def maybe_reverse_history_sequence(
+    obs: torch.Tensor, *, latest_index: int = 0, time_dim: int = -2
+) -> torch.Tensor:
+    if obs.shape[time_dim] <= 1:
+        return obs
+    if latest_index == 0:
+        return torch.flip(obs, dims=[time_dim])
+    return obs
+
+
+def _module_load_flex(module: nn.Module, state_dict: dict[str, torch.Tensor], label: str) -> None:
+    module_state = module.state_dict()
+    compatible_state = {}
+    skipped_missing = []
+    skipped_shape = []
+    for key, value in state_dict.items():
+        if key not in module_state:
+            skipped_missing.append(key)
+            continue
+        if module_state[key].shape != value.shape:
+            skipped_shape.append(
+                (key, tuple(value.shape), tuple(module_state[key].shape))
+            )
+            continue
+        compatible_state[key] = value
+    load_result = module.load_state_dict(compatible_state, strict=False)
+    if skipped_missing or skipped_shape or load_result.missing_keys:
+        warning_lines = [
+            f"Loaded {len(compatible_state)}/{len(module_state)} compatible tensors into {label}."
+        ]
+        if skipped_missing:
+            warning_lines.append(
+                f"Skipped {len(skipped_missing)} unexpected tensors in checkpoint for {label}."
+            )
+        if skipped_shape:
+            warning_lines.append(
+                f"Skipped {len(skipped_shape)} shape-mismatched tensors in {label}."
+            )
+        if load_result.missing_keys:
+            warning_lines.append(
+                f"{label} still has {len(load_result.missing_keys)} missing tensors after partial load."
+            )
+        torchrl_logger.warning(" ".join(warning_lines))
+
+
+def load_checkpoint_flex(
+    checkpoint_path: str,
+    *,
+    policy: nn.Module | None = None,
+    value_module: nn.Module | None = None,
+    optim: torch.optim.Optimizer | None = None,
+) -> tuple[int, int]:
+    checkpoint = torch.load(checkpoint_path)
+    if policy is not None and "policy_state_dict" in checkpoint:
+        _module_load_flex(policy, checkpoint["policy_state_dict"], "policy")
+    if value_module is not None and "value_module_state_dict" in checkpoint:
+        _module_load_flex(value_module, checkpoint["value_module_state_dict"], "value_module")
+    if optim is not None and "optimizer_state_dict" in checkpoint:
+        try:
+            optim.load_state_dict(checkpoint["optimizer_state_dict"])
+        except ValueError:
+            torchrl_logger.warning(
+                "Skipped optimizer state restore because the optimizer structure changed."
+            )
+    iteration = checkpoint.get("iteration", 0)
+    total_frames = checkpoint.get("total_frames", 0)
+    torchrl_logger.info(f"Checkpoint partially loaded from {checkpoint_path}")
+    return iteration, total_frames
+
+
+def _resolve_history_index(size: int, latest_index: int) -> int:
+    resolved_index = latest_index if latest_index >= 0 else size + latest_index
+    if not 0 <= resolved_index < size:
+        raise IndexError(
+            f"Resolved latest index {resolved_index} is out of range for history size {size}."
+        )
+    return resolved_index
+
+
+def _ordered_named_observation_keys(obs_sample: TensorDictBase) -> list[str]:
+    return [key for key in obs_sample.keys() if isinstance(key, str)]
+
+
+def _normalize_key_list_cfg(value) -> list[str] | None:
+    value = _normalize_optional_cfg_value(value)
+    if value is None:
+        return None
+    return [str(item) for item in value]
+
+
+def resolve_model_obs_keys(
+    *,
+    available_keys: list[str],
+    include_keys,
+    exclude_keys,
+    label: str,
+) -> list[str]:
+    include_keys = _normalize_key_list_cfg(include_keys)
+    exclude_keys = set(_normalize_key_list_cfg(exclude_keys) or [])
+    available_key_set = set(available_keys)
+
+    if include_keys is None:
+        resolved_keys = [key for key in available_keys if key not in exclude_keys]
+    else:
+        missing_keys = [key for key in include_keys if key not in available_key_set]
+        if missing_keys:
+            raise KeyError(
+                f"{label} requested unavailable observation keys: {missing_keys}. "
+                f"Available keys: {available_keys}"
+            )
+        resolved_keys = [key for key in include_keys if key not in exclude_keys]
+
+    if not resolved_keys:
+        raise ValueError(f"{label} resolved to an empty observation-key list.")
+    return resolved_keys
+
+
+def resolve_model_phase_key(candidate_key: str, available_keys: list[str], label: str) -> str:
+    if candidate_key not in available_keys:
+        raise KeyError(
+            f"{label}='{candidate_key}' is unavailable. Available observation keys: {available_keys}"
+        )
+    return candidate_key
+
+
+def _select_latest_named_leaf(
+    value: torch.Tensor,
+    *,
+    batch_dims: int,
+    latest_history_index: int,
+    use_history_observation: bool,
+) -> torch.Tensor:
+    if not use_history_observation or value.ndim <= batch_dims + 1:
+        return value
+    resolved_index = _resolve_history_index(
+        value.shape[batch_dims], latest_history_index
+    )
+    return value.select(batch_dims, resolved_index)
+
+
+def _flatten_named_leaf(value: torch.Tensor, *, batch_dims: int) -> torch.Tensor:
+    if value.ndim <= batch_dims:
+        return value.unsqueeze(-1)
+    return value.flatten(batch_dims, -1)
+
+
+def _flatten_named_leaf_preserve_time(
+    value: torch.Tensor, *, batch_dims: int
+) -> torch.Tensor:
+    if value.ndim <= batch_dims + 1:
+        return value.unsqueeze(-1)
+    return value.flatten(batch_dims + 1, -1)
+
+
+def infer_named_observation_layout(
+    obs_sample: TensorDictBase,
+    *,
+    use_history_observation: bool,
+    latest_history_index: int,
+) -> dict[str, object]:
+    obs_keys = _ordered_named_observation_keys(obs_sample)
+    current_flat_dims = {}
+    current_input_dim = 0
+    for key in obs_keys:
+        value = obs_sample.get(key)
+        current_value = _select_latest_named_leaf(
+            value,
+            batch_dims=obs_sample.batch_dims,
+            latest_history_index=latest_history_index,
+            use_history_observation=use_history_observation,
+        )
+        flat_dim = int(_flatten_named_leaf(current_value, batch_dims=obs_sample.batch_dims).shape[-1])
+        current_flat_dims[key] = flat_dim
+        current_input_dim += flat_dim
+    return {
+        "obs_keys": obs_keys,
+        "current_flat_dims": current_flat_dims,
+        "current_input_dim": current_input_dim,
+    }
+
+
+class NamedObservationProjector(nn.Module):
+    def __init__(
+        self,
+        *,
+        obs_keys: list[str],
+        use_history_observation: bool,
+        latest_history_index: int,
+    ) -> None:
+        super().__init__()
+        self.obs_keys = obs_keys
+        self.use_history_observation = use_history_observation
+        self.latest_history_index = latest_history_index
+
+    def forward(self, obs: TensorDictBase | torch.Tensor) -> torch.Tensor:
+        if isinstance(obs, torch.Tensor):
+            if self.use_history_observation:
+                resolved_index = _resolve_history_index(obs.shape[-2], self.latest_history_index)
+                obs = obs.select(-2, resolved_index)
+            return obs.flatten(-1, -1) if obs.ndim <= 3 else obs.flatten(-2, -1)
+
+        batch_dims = obs.batch_dims
+        flat_values = []
+        for key in self.obs_keys:
+            value = obs.get(key)
+            value = _select_latest_named_leaf(
+                value,
+                batch_dims=batch_dims,
+                latest_history_index=self.latest_history_index,
+                use_history_observation=self.use_history_observation,
+            )
+            flat_values.append(_flatten_named_leaf(value, batch_dims=batch_dims))
+        return torch.cat(flat_values, dim=-1)
+
+
+class NamedPhaseExtractor(nn.Module):
+    def __init__(
+        self,
+        *,
+        phase_key: str,
+        use_history_observation: bool,
+        latest_history_index: int,
+        phase_reduce: str = "max",
+    ) -> None:
+        super().__init__()
+        self.phase_key = phase_key
+        self.use_history_observation = use_history_observation
+        self.latest_history_index = latest_history_index
+        self.phase_reduce = phase_reduce
+
+    def forward(self, obs: TensorDictBase) -> torch.Tensor:
+        phase_value = obs.get(self.phase_key).to(torch.float32)
+        phase_value = _select_latest_named_leaf(
+            phase_value,
+            batch_dims=obs.batch_dims,
+            latest_history_index=self.latest_history_index,
+            use_history_observation=self.use_history_observation,
+        )
+        phase_value = _flatten_named_leaf(phase_value, batch_dims=obs.batch_dims)
+        if self.phase_reduce == "mean":
+            phase_value = phase_value.mean(dim=-1, keepdim=True)
+        elif self.phase_reduce == "max":
+            phase_value = phase_value.amax(dim=-1, keepdim=True)
+        else:
+            raise ValueError(f"Unsupported phase_reduce '{self.phase_reduce}'.")
+        return phase_value.clamp(0.0, 1.0)
+
+
+class SharedTrunkBiHeadNetwork(nn.Module):
+    def __init__(
+        self,
+        *,
+        input_dim: int,
+        out_features: int,
+        hidden_sizes: list[int],
+        head_hidden: int | None = None,
+        activation_class: type[nn.Module] = nn.Tanh,
+    ) -> None:
+        super().__init__()
+        hidden_dim = hidden_sizes[-1] if hidden_sizes else max(input_dim, out_features, 32)
+        head_hidden = hidden_dim if head_hidden is None else head_hidden
+        if hidden_sizes:
+            self.trunk = build_mlp(
+                input_dim,
+                hidden_dim,
+                hidden_sizes[:-1],
+                activation_class=activation_class,
+            )
+        else:
+            self.trunk = nn.Identity()
+        self.platoon_head = build_mlp(
+            hidden_dim,
+            out_features,
+            [head_hidden],
+            activation_class=activation_class,
+        )
+        self.hinge_head = build_mlp(
+            hidden_dim,
+            out_features,
+            [head_hidden],
+            activation_class=activation_class,
+        )
+
+    def forward(self, inputs: torch.Tensor, phase_weight: torch.Tensor) -> torch.Tensor:
+        features = self.trunk(inputs)
+        platoon_output = self.platoon_head(features)
+        hinge_output = self.hinge_head(features)
+        while phase_weight.ndim < platoon_output.ndim:
+            phase_weight = phase_weight.unsqueeze(-1)
+        return (1.0 - phase_weight) * platoon_output + phase_weight * hinge_output
+
+
+class NamedPhaseConditionedMultiAgentBackbone(nn.Module):
+    def __init__(
+        self,
+        *,
+        obs_keys: list[str],
+        phase_key: str,
+        n_agent_inputs: int,
+        n_agent_outputs: int,
+        n_agents: int,
+        centralised: bool,
+        share_params: bool,
+        depth: int,
+        num_cells: int | list[int] | tuple[int, ...],
+        head_hidden: int | None = None,
+        activation_class: type[nn.Module] = nn.Tanh,
+        use_history_observation: bool = False,
+        latest_history_index: int = 0,
+        phase_reduce: str = "max",
+    ) -> None:
+        super().__init__()
+        self.n_agents = n_agents
+        self.n_agent_outputs = n_agent_outputs
+        self.centralised = centralised
+        self.share_params = share_params
+        self.projector = NamedObservationProjector(
+            obs_keys=obs_keys,
+            use_history_observation=use_history_observation,
+            latest_history_index=latest_history_index,
+        )
+        self.phase_extractor = NamedPhaseExtractor(
+            phase_key=phase_key,
+            use_history_observation=use_history_observation,
+            latest_history_index=latest_history_index,
+            phase_reduce=phase_reduce,
+        )
+        hidden_sizes = resolve_hidden_sizes(depth, num_cells)
+        input_dim = n_agent_inputs * n_agents if centralised else n_agent_inputs
+        network_count = 1 if share_params else n_agents
+        self.networks = nn.ModuleList(
+            [
+                SharedTrunkBiHeadNetwork(
+                    input_dim=input_dim,
+                    out_features=n_agent_outputs,
+                    hidden_sizes=hidden_sizes,
+                    head_hidden=head_hidden,
+                    activation_class=activation_class,
+                )
+                for _ in range(network_count)
+            ]
+        )
+
+    def forward(self, obs: TensorDictBase) -> torch.Tensor:
+        flat_obs = self.projector(obs)
+        phase_weight = self.phase_extractor(obs)
+        shared_inputs = flat_obs.flatten(-2, -1) if self.centralised else flat_obs
+        if self.centralised:
+            phase_for_network = phase_weight.mean(dim=-2, keepdim=False).clamp(0.0, 1.0)
+        else:
+            phase_for_network = phase_weight
+
+        if self.share_params:
+            if self.centralised:
+                output = self.networks[0](shared_inputs, phase_for_network)
+                return output.unsqueeze(-2).expand(*output.shape[:-1], self.n_agents, self.n_agent_outputs)
+            return self.networks[0](shared_inputs, phase_for_network)
+
+        outputs = []
+        for agent_idx, network in enumerate(self.networks):
+            agent_inputs = shared_inputs if self.centralised else shared_inputs[..., agent_idx, :]
+            agent_phase = (
+                phase_for_network
+                if self.centralised
+                else phase_for_network[..., agent_idx, :]
+            )
+            outputs.append(network(agent_inputs, agent_phase).unsqueeze(-2))
+        return torch.cat(outputs, dim=-2)
+
+
+class NamedPhaseAwareCentralCritic(nn.Module):
+    def __init__(
+        self,
+        *,
+        obs_keys: list[str],
+        phase_key: str,
+        n_agent_inputs: int,
+        n_agents: int,
+        share_params: bool,
+        depth: int,
+        num_cells: int | list[int] | tuple[int, ...],
+        activation_class: type[nn.Module] = nn.Tanh,
+        use_history_observation: bool = False,
+        latest_history_index: int = 0,
+    ) -> None:
+        super().__init__()
+        self.n_agents = n_agents
+        self.share_params = share_params
+        self.projector = NamedObservationProjector(
+            obs_keys=obs_keys,
+            use_history_observation=use_history_observation,
+            latest_history_index=latest_history_index,
+        )
+        self.phase_extractor = NamedPhaseExtractor(
+            phase_key=phase_key,
+            use_history_observation=use_history_observation,
+            latest_history_index=latest_history_index,
+            phase_reduce="max",
+        )
+        hidden_sizes = resolve_hidden_sizes(depth, num_cells)
+        input_dim = n_agents * n_agent_inputs + n_agents
+        network_count = 1 if share_params else n_agents
+        self.networks = nn.ModuleList(
+            [
+                SharedTrunkBiHeadNetwork(
+                    input_dim=input_dim,
+                    out_features=1,
+                    hidden_sizes=hidden_sizes,
+                    activation_class=activation_class,
+                )
+                for _ in range(network_count)
+            ]
+        )
+
+    def forward(self, obs: TensorDictBase) -> torch.Tensor:
+        flat_obs = self.projector(obs)
+        phase_value = self.phase_extractor(obs)
+        global_obs = flat_obs.flatten(-2, -1)
+        global_phase = phase_value.reshape(*phase_value.shape[:-2], -1)
+        critic_input = torch.cat([global_obs, global_phase], dim=-1)
+        agent_phase = phase_value.reshape(*phase_value.shape[:-1]).clamp(0.0, 1.0)
+
+        if self.share_params:
+            outputs = []
+            shared_network = self.networks[0]
+            for agent_idx in range(self.n_agents):
+                outputs.append(
+                    shared_network(
+                        critic_input,
+                        agent_phase[..., agent_idx : agent_idx + 1],
+                    ).unsqueeze(-2)
+                )
+            return torch.cat(outputs, dim=-2)
+
+        outputs = []
+        for agent_idx, network in enumerate(self.networks):
+            outputs.append(
+                network(
+                    critic_input,
+                    agent_phase[..., agent_idx : agent_idx + 1],
+                ).unsqueeze(-2)
+            )
+        return torch.cat(outputs, dim=-2)
+
+
+class NamedRetentiveActorAgent(nn.Module):
+    def __init__(
+        self,
+        *,
+        self_current_keys: list[str],
+        hinge_history_key: str | None,
+        other_history_keys: list[str],
+        hidden_sizes: list[int],
+        sample_agent_obs: dict[str, torch.Tensor],
+        latest_history_index: int = 0,
+        out_features: int,
+        activation_class: type[nn.Module] = nn.Tanh,
+    ) -> None:
+        super().__init__()
+        self.self_current_keys = self_current_keys
+        self.hinge_history_key = hinge_history_key
+        self.other_history_keys = other_history_keys
+        self.latest_history_index = latest_history_index
+
+        batch_dims = 0
+        self_current_dim = 0
+        for key in self_current_keys:
+            current_value = _select_latest_named_leaf(
+                sample_agent_obs[key],
+                batch_dims=batch_dims,
+                latest_history_index=latest_history_index,
+                use_history_observation=True,
+            )
+            self_current_dim += int(
+                _flatten_named_leaf(current_value, batch_dims=batch_dims).shape[-1]
+            )
+
+        base_hidden = hidden_sizes[-1] if hidden_sizes else max(out_features, 64)
+        branch_hidden = max(32, base_hidden // 2)
+        self.self_encoder = build_mlp(
+            max(self_current_dim, 1),
+            branch_hidden,
+            [branch_hidden],
+            activation_class=activation_class,
+        )
+
+        if hinge_history_key is not None:
+            hinge_value = sample_agent_obs[hinge_history_key]
+            if hinge_value.ndim > batch_dims + 2:
+                hinge_value = hinge_value.select(batch_dims + 1, 0)
+            hinge_step_dim = int(
+                _flatten_named_leaf_preserve_time(
+                    hinge_value, batch_dims=batch_dims
+                ).shape[-1]
+            )
+            self.hinge_step_encoder = build_mlp(
+                hinge_step_dim,
+                branch_hidden,
+                [branch_hidden],
+                activation_class=activation_class,
+            )
+            self.hinge_lstm = nn.LSTM(
+                input_size=branch_hidden,
+                hidden_size=branch_hidden,
+                batch_first=True,
+            )
+            self.hinge_feature_dim = branch_hidden
+        else:
+            self.hinge_step_encoder = None
+            self.hinge_lstm = None
+            self.hinge_feature_dim = 0
+
+        if other_history_keys:
+            first_other = sample_agent_obs[other_history_keys[0]]
+            self.n_other_agents = int(first_other.shape[batch_dims + 1])
+            other_entity_dim = 0
+            for key in other_history_keys:
+                other_value = sample_agent_obs[key]
+                other_entity_dim += int(other_value.flatten(batch_dims + 2, -1).shape[-1])
+            self.other_entity_encoder = build_mlp(
+                other_entity_dim,
+                branch_hidden,
+                [branch_hidden],
+                activation_class=activation_class,
+            )
+            self.other_step_projector = build_mlp(
+                self.n_other_agents * branch_hidden,
+                branch_hidden,
+                [branch_hidden],
+                activation_class=activation_class,
+            )
+            self.other_lstm = nn.LSTM(
+                input_size=branch_hidden,
+                hidden_size=branch_hidden,
+                batch_first=True,
+            )
+            self.other_feature_dim = branch_hidden
+        else:
+            self.n_other_agents = 0
+            self.other_entity_encoder = None
+            self.other_step_projector = None
+            self.other_lstm = None
+            self.other_feature_dim = 0
+
+        fusion_in_dim = branch_hidden + self.hinge_feature_dim + self.other_feature_dim
+        self.fusion_mlp = build_mlp(
+            fusion_in_dim,
+            out_features,
+            hidden_sizes,
+            activation_class=activation_class,
+        )
+
+    def _self_feature(self, obs: dict[str, torch.Tensor], batch_dims: int) -> torch.Tensor:
+        features = []
+        for key in self.self_current_keys:
+            current_value = _select_latest_named_leaf(
+                obs[key],
+                batch_dims=batch_dims,
+                latest_history_index=self.latest_history_index,
+                use_history_observation=True,
+            )
+            features.append(_flatten_named_leaf(current_value, batch_dims=batch_dims))
+        return self.self_encoder(torch.cat(features, dim=-1))
+
+    def _hinge_feature(
+        self, obs: dict[str, torch.Tensor], batch_dims: int
+    ) -> torch.Tensor | None:
+        if self.hinge_history_key is None or self.hinge_step_encoder is None:
+            return None
+        hinge_value = obs[self.hinge_history_key]
+        if hinge_value.ndim > batch_dims + 2:
+            hinge_value = hinge_value.select(batch_dims + 1, 0)
+        hinge_value = maybe_reverse_history_sequence(
+            hinge_value,
+            latest_index=self.latest_history_index,
+            time_dim=batch_dims,
+        )
+        hinge_steps = _flatten_named_leaf_preserve_time(
+            hinge_value, batch_dims=batch_dims
+        )
+        hinge_encoded = self.hinge_step_encoder(hinge_steps)
+        _, (hidden_state, _) = self.hinge_lstm(hinge_encoded)
+        return hidden_state[-1]
+
+    def _other_feature(
+        self, obs: dict[str, torch.Tensor], batch_dims: int
+    ) -> torch.Tensor | None:
+        if not self.other_history_keys or self.other_entity_encoder is None:
+            return None
+        other_parts = []
+        for key in self.other_history_keys:
+            other_value = maybe_reverse_history_sequence(
+                obs[key],
+                latest_index=self.latest_history_index,
+                time_dim=batch_dims,
+            )
+            if other_value.ndim == batch_dims + 2:
+                other_value = other_value.unsqueeze(-1)
+            else:
+                other_value = other_value.flatten(batch_dims + 2, -1)
+            other_parts.append(other_value)
+        other_value = torch.cat(other_parts, dim=-1)
+        encoded_entities = self.other_entity_encoder(other_value)
+        flattened_entities = encoded_entities.reshape(
+            *encoded_entities.shape[: batch_dims + 1],
+            self.n_other_agents * encoded_entities.shape[-1],
+        )
+        other_step_features = self.other_step_projector(flattened_entities)
+        _, (hidden_state, _) = self.other_lstm(other_step_features)
+        return hidden_state[-1]
+
+    def forward(self, obs: dict[str, torch.Tensor], batch_dims: int) -> torch.Tensor:
+        branch_features = [self._self_feature(obs, batch_dims)]
+        hinge_feature = self._hinge_feature(obs, batch_dims)
+        if hinge_feature is not None:
+            branch_features.append(hinge_feature)
+        other_feature = self._other_feature(obs, batch_dims)
+        if other_feature is not None:
+            branch_features.append(other_feature)
+        return self.fusion_mlp(torch.cat(branch_features, dim=-1))
+
+
+class NamedRetentiveActorBackbone(nn.Module):
+    def __init__(
+        self,
+        *,
+        sample_obs: TensorDictBase,
+        self_current_keys: list[str],
+        hinge_history_key: str | None,
+        other_history_keys: list[str],
+        n_agent_outputs: int,
+        n_agents: int,
+        share_params: bool,
+        depth: int,
+        num_cells: int | list[int] | tuple[int, ...],
+        activation_class: type[nn.Module] = nn.Tanh,
+        latest_history_index: int = 0,
+    ) -> None:
+        super().__init__()
+        self.n_agents = n_agents
+        self.n_agent_outputs = n_agent_outputs
+        self.share_params = share_params
+        self.self_current_keys = self_current_keys
+        self.hinge_history_key = hinge_history_key
+        self.other_history_keys = other_history_keys
+        hidden_sizes = resolve_hidden_sizes(depth, num_cells)
+        selected_keys = set(self_current_keys + other_history_keys)
+        if hinge_history_key is not None:
+            selected_keys.add(hinge_history_key)
+        sample_agent_obs = {
+            key: sample_obs.get(key).select(sample_obs.batch_dims - 1, 0)
+            for key in selected_keys
+        }
+        network_count = 1 if share_params else n_agents
+        self.agent_networks = nn.ModuleList(
+            [
+                NamedRetentiveActorAgent(
+                    self_current_keys=self_current_keys,
+                    hinge_history_key=hinge_history_key,
+                    other_history_keys=other_history_keys,
+                    hidden_sizes=hidden_sizes,
+                    sample_agent_obs=sample_agent_obs,
+                    latest_history_index=latest_history_index,
+                    out_features=n_agent_outputs,
+                    activation_class=activation_class,
+                )
+                for _ in range(network_count)
+            ]
+        )
+
+    def forward(self, obs: TensorDictBase) -> torch.Tensor:
+        agent_dim = obs.batch_dims - 1
+        batch_dims_wo_agent = obs.batch_dims - 1
+        outputs = []
+        for agent_idx in range(self.n_agents):
+            agent_obs = {
+                key: obs.get(key).select(agent_dim, agent_idx)
+                for key in self.agent_networks[0].self_current_keys
+            }
+            if self.hinge_history_key is not None:
+                agent_obs[self.hinge_history_key] = obs.get(self.hinge_history_key).select(
+                    agent_dim, agent_idx
+                )
+            for key in self.other_history_keys:
+                agent_obs[key] = obs.get(key).select(agent_dim, agent_idx)
+            network = self.agent_networks[0] if self.share_params else self.agent_networks[agent_idx]
+            outputs.append(
+                network(agent_obs, batch_dims_wo_agent).unsqueeze(-2)
+            )
+        return torch.cat(outputs, dim=-2)
+
+
 def configure_eval_env_paths(env_test: VmasEnv, path_ids: list[int]) -> None:
     road = env_test.scenario.road
     full_path_library = list(road.path_library)
@@ -567,6 +1319,7 @@ def train(cfg: DictConfig):
     cfg.train.device = "cpu" if not torch.cuda.device_count() else "cuda:0"
     cfg.env.device = cfg.train.device
     cfg.env.max_steps = eval(cfg.env.max_steps)
+    configure_advanced_model_inputs(cfg)
     print(cfg.env)
     torch.manual_seed(cfg.seed)
     resume_from_checkpoint = cfg.train.resume_from_checkpoint
@@ -595,67 +1348,159 @@ def train(cfg: DictConfig):
     cfg_test.env.scenario.init_vel_std = 0
     env_test = None
 
-    share_params = True if cfg.model.shared_parameters else False
+    share_params = bool(cfg.model.shared_parameters)
+    is_actor_retentive = bool(cfg.model.get("is_actor_retentive", False))
+    is_critic_bi_head = bool(cfg.model.get("is_critic_bi_head", False))
     use_phase_conditioned_network = bool(
         cfg.model.get("use_phase_conditioned_network", False)
     )
+    history_latest_index = int(cfg.model.get("history_latest_index", 0))
+    actor_cfg = cfg.model.actor
+    critic_cfg = cfg.model.critic
+    actor_fields_cfg = actor_cfg.fields
+    critic_fields_cfg = critic_cfg.fields
+    actor_retentive_cfg = actor_cfg.retentive
     # Policy
-    actor_depth = int(cfg.model.get("actor_depth", 2))
-    actor_num_cells = cfg.model.get("actor_num_cells", 344)
-    actor_head_hidden = cfg.model.get(
-        "actor_head_hidden", cfg.model.get("actor_module_hidden", actor_num_cells)
+    actor_depth = int(actor_cfg.depth)
+    actor_num_cells = actor_cfg.num_cells
+    critic_depth = int(critic_cfg.depth)
+    critic_num_cells = critic_cfg.num_cells
+    critic_head_hidden = critic_cfg.get("head_hidden", None)
+
+    uses_history_observation = bool(cfg.env.scenario.get("use_history_observation", False))
+    action_dim = env.full_action_spec_unbatched[env.action_key].shape[-1]
+    sample_td = env.reset()
+    sample_obs = sample_td.get(("agents", "observation"))
+    if not isinstance(sample_obs, TensorDictBase):
+        raise TypeError(
+            "OCCT training now expects dictionary-based observations from the scenario. "
+            f"Got observation type {type(sample_obs).__name__} instead."
+        )
+    if uses_history_observation and not is_actor_retentive:
+        raise RuntimeError(
+            "is_actor_retentive=False does not allow multi-frame history observations. "
+            "Disable env.scenario.use_history_observation or enable model.is_actor_retentive."
+        )
+    obs_layout = infer_named_observation_layout(
+        sample_obs,
+        use_history_observation=uses_history_observation,
+        latest_history_index=history_latest_index,
     )
-    critic_depth = int(cfg.model.get("critic_depth", 2))
-    critic_num_cells = cfg.model.get("critic_num_cells", 688)
-    critic_head_hidden = cfg.model.get(
-        "critic_head_hidden", cfg.model.get("critic_module_hidden", critic_num_cells)
+    available_obs_keys = list(obs_layout["obs_keys"])
+    obs_key_dims = dict(obs_layout["current_flat_dims"])
+
+    actor_obs_keys = resolve_model_obs_keys(
+        available_keys=available_obs_keys,
+        include_keys=actor_fields_cfg.get("include", None),
+        exclude_keys=actor_fields_cfg.get("exclude", None),
+        label="actor_obs_keys",
     )
+    critic_obs_keys = resolve_model_obs_keys(
+        available_keys=available_obs_keys,
+        include_keys=critic_fields_cfg.get("include", None),
+        exclude_keys=critic_fields_cfg.get("exclude", None),
+        label="critic_obs_keys",
+    )
+    actor_input_dim = sum(obs_key_dims[key] for key in actor_obs_keys)
+    critic_input_dim = sum(obs_key_dims[key] for key in critic_obs_keys)
+
     if use_phase_conditioned_network and not bool(cfg.model.get("centralised_critic", True)):
         torchrl_logger.warning(
             "Phase-conditioned OCCT training always uses a centralized critic. "
             "Overriding model.centralised_critic=False."
         )
-    phase_slice = None
     if use_phase_conditioned_network:
-        observation_env = env.base_env if hasattr(env, "base_env") else env
-        observation_group_slices = infer_observation_group_slices(
-            observation_env, agent_index=min(AGENT_FOCUS_INDEX, env.n_agents - 1)
+        torchrl_logger.warning(
+            "model.use_phase_conditioned_network now affects only the critic path. "
+            "The actor always uses either the standard single-head MLP or the retentive actor."
         )
-        phase_obs_group = cfg.model.get("phase_obs_group", "self_hinge_status")
-        if phase_obs_group not in observation_group_slices:
-            raise KeyError(
-                f"Observation group '{phase_obs_group}' not found. Available groups: "
-                f"{sorted(observation_group_slices.keys())}"
-            )
-        phase_slice = observation_group_slices[phase_obs_group]
+    phase_obs_group = (
+        resolve_model_phase_key(
+            str(critic_cfg.phase_obs_key),
+            available_obs_keys,
+            "critic.phase_obs_key",
+        )
+        if (use_phase_conditioned_network or is_critic_bi_head)
+        else None
+    )
 
-    if use_phase_conditioned_network:
-        actor_backbone = PhaseConditionedMultiAgentMLP(
-            n_agent_inputs=env.observation_spec["agents", "observation"].shape[-1],
-            n_agent_outputs=2
-            * env.full_action_spec_unbatched[env.action_key].shape[-1],
+    if is_actor_retentive:
+        retentive_self_keys = resolve_model_obs_keys(
+            available_keys=available_obs_keys,
+            include_keys=actor_retentive_cfg.get(
+                "self_keys",
+                [
+                    "self_vel",
+                    "self_speed",
+                    "self_steering",
+                    "self_acc",
+                    "self_distance_to_ref",
+                    "self_left_boundary_distance",
+                    "self_right_boundary_distance",
+                    "self_distance_to_left_boundary",
+                    "self_distance_to_right_boundary",
+                    "self_platoon_error_vel",
+                    "self_hinge_error_vel",
+                    "self_platoon_error_space",
+                ],
+            ),
+            exclude_keys=[],
+            label="actor.retentive.self_keys",
+        )
+        retentive_other_keys = resolve_model_obs_keys(
+            available_keys=available_obs_keys,
+            include_keys=actor_retentive_cfg.get(
+                "other_keys",
+                [
+                    "others_pos",
+                    "others_rot",
+                    "others_relative_longitudinal_velocity",
+                    "others_distance",
+                ],
+            ),
+            exclude_keys=[],
+            label="actor.retentive.other_keys",
+        )
+        hinge_history_key = _normalize_optional_cfg_value(
+            actor_retentive_cfg.get("hinge_key", "self_hinge_info")
+        )
+        if hinge_history_key is not None:
+            hinge_history_key = resolve_model_phase_key(
+                str(hinge_history_key),
+                available_obs_keys,
+                "actor.retentive.hinge_key",
+            )
+        actor_backbone = NamedRetentiveActorBackbone(
+            sample_obs=sample_obs,
+            self_current_keys=retentive_self_keys,
+            hinge_history_key=hinge_history_key,
+            other_history_keys=retentive_other_keys,
+            n_agent_outputs=2 * action_dim,
             n_agents=env.n_agents,
-            centralised=False,
             share_params=share_params,
-            device=cfg.train.device,
             depth=actor_depth,
             num_cells=actor_num_cells,
-            head_hidden=actor_head_hidden,
             activation_class=nn.Tanh,
-            phase_slice=phase_slice,
+            latest_history_index=history_latest_index,
         )
     else:
-        actor_backbone = MultiAgentMLP(
-            n_agent_inputs=env.observation_spec["agents", "observation"].shape[-1],
-            n_agent_outputs=2
-            * env.full_action_spec_unbatched[env.action_key].shape[-1],
-            n_agents=env.n_agents,
-            centralised=False,
-            share_params=share_params,
-            device=cfg.train.device,
-            depth=actor_depth,
-            num_cells=actor_num_cells,
-            activation_class=nn.Tanh,
+        actor_backbone = nn.Sequential(
+            NamedObservationProjector(
+                obs_keys=actor_obs_keys,
+                use_history_observation=uses_history_observation,
+                latest_history_index=history_latest_index,
+            ),
+            MultiAgentMLP(
+                n_agent_inputs=actor_input_dim,
+                n_agent_outputs=2 * action_dim,
+                n_agents=env.n_agents,
+                centralised=False,
+                share_params=share_params,
+                device=cfg.train.device,
+                depth=actor_depth,
+                num_cells=actor_num_cells,
+                activation_class=nn.Tanh,
+            ),
         )
     actor_net = nn.Sequential(actor_backbone, NormalParamExtractor())
     policy_module = TensorDictModule(
@@ -677,36 +1522,66 @@ def train(cfg: DictConfig):
     )
 
     # Critic
-    if use_phase_conditioned_network:
-        module = PhaseConditionedMultiAgentMLP(
-            n_agent_inputs=env.observation_spec["agents", "observation"].shape[-1],
+    if is_critic_bi_head:
+        module = NamedPhaseAwareCentralCritic(
+            obs_keys=critic_obs_keys,
+            phase_key=phase_obs_group,
+            n_agent_inputs=critic_input_dim,
+            n_agents=env.n_agents,
+            share_params=share_params,
+            depth=critic_depth,
+            num_cells=critic_num_cells,
+            activation_class=nn.Tanh,
+            use_history_observation=uses_history_observation,
+            latest_history_index=history_latest_index,
+        )
+        value_module = ValueOperator(
+            module=module,
+            in_keys=[("agents", "observation")],
+        )
+    elif use_phase_conditioned_network:
+        module = NamedPhaseConditionedMultiAgentBackbone(
+            obs_keys=critic_obs_keys,
+            phase_key=phase_obs_group,
+            n_agent_inputs=critic_input_dim,
             n_agent_outputs=1,
             n_agents=env.n_agents,
             centralised=True,
             share_params=share_params,
-            device=cfg.train.device,
             depth=critic_depth,
             num_cells=critic_num_cells,
             head_hidden=critic_head_hidden,
             activation_class=nn.Tanh,
-            phase_slice=phase_slice,
+            use_history_observation=uses_history_observation,
+            latest_history_index=history_latest_index,
+        )
+        value_module = ValueOperator(
+            module=module,
+            in_keys=[("agents", "observation")],
         )
     else:
-        module = MultiAgentMLP(
-            n_agent_inputs=env.observation_spec["agents", "observation"].shape[-1],
-            n_agent_outputs=1,
-            n_agents=env.n_agents,
-            centralised=cfg.model.centralised_critic,
-            share_params=share_params,
-            device=cfg.train.device,
-            depth=critic_depth,
-            num_cells=critic_num_cells,
-            activation_class=nn.Tanh,
+        module = nn.Sequential(
+            NamedObservationProjector(
+                obs_keys=critic_obs_keys,
+                use_history_observation=uses_history_observation,
+                latest_history_index=history_latest_index,
+            ),
+            MultiAgentMLP(
+                n_agent_inputs=critic_input_dim,
+                n_agent_outputs=1,
+                n_agents=env.n_agents,
+                centralised=cfg.model.centralised_critic,
+                share_params=share_params,
+                device=cfg.train.device,
+                depth=critic_depth,
+                num_cells=critic_num_cells,
+                activation_class=nn.Tanh,
+            ),
         )
-    value_module = ValueOperator(
-        module=module,
-        in_keys=[("agents", "observation")],
-    )
+        value_module = ValueOperator(
+            module=module,
+            in_keys=[("agents", "observation")],
+        )
     phase_weight_controller = MetricAdaptiveWeightController(cfg, cfg.train.device)
     if cfg.collector.n_iters > 0:
         collector = SyncDataCollector(
@@ -747,15 +1622,39 @@ def train(cfg: DictConfig):
     optim = torch.optim.Adam(loss_module.parameters(), cfg.train.lr)
 
     if os.path.exists(resume_from_checkpoint):
+        use_flexible_checkpoint_loading = (
+            resume_mode in {"warm_start", "fine_tune"}
+            and (is_actor_retentive or is_critic_bi_head)
+        )
         if resume_mode == "resume":
             start_iteration, start_frames = load_checkpoint(
                 resume_from_checkpoint, policy, value_module, optim
             )
         elif resume_mode == "warm_start":
-            _ = load_checkpoint(resume_from_checkpoint, policy, value_module, optim=None)
+            if use_flexible_checkpoint_loading:
+                _ = load_checkpoint_flex(
+                    resume_from_checkpoint,
+                    policy=policy,
+                    value_module=value_module,
+                    optim=None,
+                )
+            else:
+                _ = load_checkpoint(
+                    resume_from_checkpoint, policy, value_module, optim=None
+                )
             start_iteration, start_frames = 0, 0
         elif resume_mode == "fine_tune":
-            _ = load_checkpoint(resume_from_checkpoint, policy, value_module=None, optim=None)
+            if use_flexible_checkpoint_loading:
+                _ = load_checkpoint_flex(
+                    resume_from_checkpoint,
+                    policy=policy,
+                    value_module=None,
+                    optim=None,
+                )
+            else:
+                _ = load_checkpoint(
+                    resume_from_checkpoint, policy, value_module=None, optim=None
+                )
             start_iteration, start_frames = 0, 0
         else:
             raise TypeError
@@ -770,8 +1669,21 @@ def train(cfg: DictConfig):
         )
     # Logging
     if cfg.logger.backend:
-        model_prefix = "PhaseMAPPO" if use_phase_conditioned_network else "MAPPO"
-        if not use_phase_conditioned_network and not cfg.model.centralised_critic:
+        if is_actor_retentive and is_critic_bi_head:
+            model_prefix = "RetentiveBiHeadMAPPO"
+        elif is_actor_retentive:
+            model_prefix = "RetentiveMAPPO"
+        elif is_critic_bi_head:
+            model_prefix = "BiHeadMAPPO"
+        elif use_phase_conditioned_network:
+            model_prefix = "PhaseMAPPO"
+        else:
+            model_prefix = "MAPPO"
+        if (
+            not use_phase_conditioned_network
+            and not is_critic_bi_head
+            and not cfg.model.centralised_critic
+        ):
             model_prefix = "IPPO"
         model_name = ("Het" if not cfg.model.shared_parameters else "") + model_prefix
         logger = init_logging(cfg, model_name)
