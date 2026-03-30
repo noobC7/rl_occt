@@ -20,12 +20,12 @@ env:
     init_arc_pos: 0.0
     use_center_frenet_ref: True
     n_nearing_agents_observed: 2
-    use_history_observation: True
+    use_history_observation: False
     history_obs_len: 10
     n_observed_steps: 10
     n_stored_steps: 10
     history_obs_dim: null
-    hinge_short_term_status_mode: boundary_margin
+    remove_hinge_status_from_observation: True
     # reward weights
     reward_progress: 5.0
     reward_vel: 0
@@ -45,8 +45,8 @@ env:
     goal_incomplete_hinge_penalty_mode: constant
     penalty_near_boundary: -200
     penalty_near_other_agents: -200
-    penalty_change_steering: -0.0
-    penalty_change_acc: -0.0
+    penalty_change_steering: -1.0
+    penalty_change_acc: -0.001
     penalty_collide_with_agents: -400
     penalty_outside_boundaries: -400
     penalty_hinge_time_cost: -80
@@ -57,20 +57,10 @@ env:
 model:
   shared_parameters: True
   centralised_critic: True
-  use_phase_conditioned_network: False
   actor_depth: 2
   actor_num_cells: 344
   critic_depth: 2
   critic_num_cells: 688
-  lipsnet_controller_mode: phase_blend
-  lipsnet_lambda_t: 5e-4
-  lipsnet_lambda_k: 2e-3
-  lipsnet_kernel_scale: 0.02
-  lipsnet_norm_layer_type: none
-  lipsnet_jacobian_samples: 256
-  lipsnet_phase_feature_indices: null
-  lipsnet_phase_weight_scale: 1.0
-  lipsnet_steering_action_index: -1
 
 collector:
   frames_per_batch: 60_000
@@ -86,22 +76,6 @@ loss:
   entropy_eps: 0.05
   clip_epsilon: 0.2
 
-adaptive_weighting:
-  enabled: False
-  ema_tau: 0.1
-  initial_hinge_weight: 0.0
-  min_platoon_weight: 0.2
-  max_hinge_weight: 0.8
-  collision_high_threshold: 0.20
-  collision_low_threshold: 0.08
-  platoon_space_error_threshold: 0.60
-  platoon_ref_error_threshold: 0.20
-  all_hinged_target: 0.85
-  all_hinged_plateau_delta: 0.01
-  plateau_patience: 3
-  hinge_weight_step: 0.05
-  collision_weight_step: 0.10
-
 train:
   num_epochs: 45
   minibatch_size: 4096
@@ -109,7 +83,7 @@ train:
   max_grad_norm: 40.0
   device: ???
   resume_mode: fine_tune
-  resume_from_checkpoint: /home/yons/Graduation/rl_occt/outputs/2026-03-26/16-40-30_lipsnet_phase_blending_history10_train/checkpoints/checkpoint_iter_299_frames_18000000.pt
+  resume_from_checkpoint: /home/yons/Graduation/rl_occt/outputs/2026-03-28/23-23-38_mlp_full_obse_no_hinge_status_train/checkpoints/checkpoint_iter_299_frames_18000000.pt
 
 eval:
   evaluation_interval: 10
@@ -119,6 +93,6 @@ eval:
 logger:
   backend: swanlab
   project_name: "MAPPO_OCCT_TWO_STAGE"
-  group_name: "lipsnet_phase_blending_history10"
+  group_name: "mlp_full_obse_no_hinge_status_h10"
   resume_swanlab_id: None
   mode: local

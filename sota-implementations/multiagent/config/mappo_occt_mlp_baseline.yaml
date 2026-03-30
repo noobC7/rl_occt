@@ -15,27 +15,25 @@ env:
     cargo_half_width: 2
     threshold_near_other_agents_c2c_high: 6
     max_speed: 8
-    init_vel_std: 1
+    init_vel_std: 1 # useless if is_rand_init_vel is False
     still_space: 6
-    init_arc_pos: 0.0
-    use_center_frenet_ref: True
+    init_arc_pos: 0.0 # useless if is_rand_arc_pos is False
+    use_center_frenet_ref: True # True means use continuous frenet reference, False means use discrete reference
     n_nearing_agents_observed: 2
-    use_history_observation: True
-    history_obs_len: 10
-    n_observed_steps: 10
-    n_stored_steps: 10
-    history_obs_dim: null
+    use_history_observation: False
+    history_obs_len: 5 # capped by n_observed_steps
+    history_obs_dim: null # null keeps the raw concatenated history feature dimension
     hinge_short_term_status_mode: boundary_margin
     # reward weights
     reward_progress: 5.0
     reward_vel: 0
     reward_goal: 0
-    reward_platoon_vel: 20
+    reward_platoon_vel: 20       
     reward_platoon_space: 20
     reward_platoon_ref: 50
     reward_platoon_heading: 10
-
-    reward_hinge: 20000
+    
+    reward_hinge: 20000    
     reward_hinge_vel: 20
     reward_hinge_space: 20
     reward_hinge_ref: 20
@@ -51,30 +49,24 @@ env:
     penalty_outside_boundaries: -400
     penalty_hinge_time_cost: -80
     penalty_backward: -400
-  device: ???
+  device: ??? # These values will be populated dynamically
   vmas_envs: 300
 
 model:
   shared_parameters: True
-  centralised_critic: True
+  centralised_critic: True  # kept for the MLP/IPPO script compatibility
   use_phase_conditioned_network: False
   actor_depth: 2
   actor_num_cells: 344
+  actor_head_hidden: 128
   critic_depth: 2
   critic_num_cells: 688
-  lipsnet_controller_mode: phase_blend
-  lipsnet_lambda_t: 5e-4
-  lipsnet_lambda_k: 2e-3
-  lipsnet_kernel_scale: 0.02
-  lipsnet_norm_layer_type: none
-  lipsnet_jacobian_samples: 256
-  lipsnet_phase_feature_indices: null
-  lipsnet_phase_weight_scale: 1.0
-  lipsnet_steering_action_index: -1
+  critic_head_hidden: 256
+  phase_obs_group: self_hinge_status
 
 collector:
-  frames_per_batch: 60_000
-  n_iters: 0
+  frames_per_batch: 60_000 # Frames sampled each sampling iteration
+  n_iters: 300 # Number of sampling/training iterations
   total_frames: ???
 
 buffer:
@@ -103,13 +95,13 @@ adaptive_weighting:
   collision_weight_step: 0.10
 
 train:
-  num_epochs: 45
-  minibatch_size: 4096
+  num_epochs: 45  # optimization steps per batch of data collected
+  minibatch_size: 4096 # size of minibatches used in each epoch
   lr: 5e-5
   max_grad_norm: 40.0
   device: ???
   resume_mode: fine_tune
-  resume_from_checkpoint: /home/yons/Graduation/rl_occt/outputs/2026-03-26/16-40-30_lipsnet_phase_blending_history10_train/checkpoints/checkpoint_iter_299_frames_18000000.pt
+  resume_from_checkpoint: None # absolute path
 
 eval:
   evaluation_interval: 10
@@ -117,8 +109,9 @@ eval:
   render_batch_size: 6
 
 logger:
-  backend: swanlab
+  # api: k6ojXGwJPKWLounY3nzZX
+  backend: swanlab # Delete to remove logging
   project_name: "MAPPO_OCCT_TWO_STAGE"
-  group_name: "lipsnet_phase_blending_history10"
-  resume_swanlab_id: None
+  group_name: "ours0324_full_obse_mlp_eval"
+  resume_swanlab_id: None # copy from swanlab page
   mode: local

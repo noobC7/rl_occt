@@ -71,7 +71,7 @@ model:
 
 collector:
   frames_per_batch: 60_000
-  n_iters: 300
+  n_iters: 0
   total_frames: ???
 
 buffer:
@@ -106,7 +106,7 @@ train:
   max_grad_norm: 40.0
   device: ???
   resume_mode: fine_tune
-  resume_from_checkpoint: None
+  resume_from_checkpoint: /home/yons/Graduation/rl_occt/outputs/2026-03-26/16-37-14_lipsnet_continue_baseline_history10_train/checkpoints/checkpoint_iter_299_frames_18000000.pt
 
 eval:
   evaluation_interval: 10
@@ -118,4 +118,4 @@ logger:
   project_name: "MAPPO_OCCT_TWO_STAGE"
   group_name: "lipsnet_continue_baseline_history10"
   resume_swanlab_id: None
-  mode: cloud
+  mode: local

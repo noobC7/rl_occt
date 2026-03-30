@@ -20,7 +20,7 @@ env:
     init_arc_pos: 0.0
     use_center_frenet_ref: True
     n_nearing_agents_observed: 2
-    use_history_observation: True
+    use_history_observation: False
     history_obs_len: 10
     n_observed_steps: 10
     n_stored_steps: 10
@@ -64,7 +64,7 @@ model:
 
 collector:
   frames_per_batch: 60_000
-  n_iters: 300
+  n_iters: 0
   total_frames: ???
 
 buffer:
@@ -83,7 +83,7 @@ train:
   max_grad_norm: 40.0
   device: ???
   resume_mode: fine_tune
-  resume_from_checkpoint: None
+  resume_from_checkpoint: /home/yons/Graduation/rl_occt/outputs/2026-03-27/02-20-26_mlp_continuous_act_change_penalty_history10_train/checkpoints/checkpoint_iter_299_frames_18000000.pt
 
 eval:
   evaluation_interval: 10
@@ -95,4 +95,4 @@ logger:
   project_name: "MAPPO_OCCT_TWO_STAGE"
   group_name: "mlp_continues_act_change_penalty_history10"
   resume_swanlab_id: None
-  mode: cloud
+  mode: local

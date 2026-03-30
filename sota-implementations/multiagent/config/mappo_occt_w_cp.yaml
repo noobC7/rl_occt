@@ -2,37 +2,36 @@ seed: 40
 
 env:
   max_steps: None
-  eval_max_steps: 600 #can be more than 1200, otherwise trainning will be extremely slow
+  eval_max_steps: 800
   scenario_name: "occt_scenario"
   scenario:
     viewer_zoom: 17.0
     resolution_factor: 2
     n_agents: 4
     task_class: 1
-    is_rand_arc_pos: True
-    cargo_half_width: 2
-    threshold_near_other_agents_c2c_high: 6
+    is_rand_arc_pos: False
+    cargo_half_width: 6
     init_vel_mean: 3.0
     init_vel_std: 1.0 # useless if is_rand_init_vel is False
     still_space: 6
-    init_arc_pos: 0.0 # useless if is_rand_arc_pos is False
+    init_arc_pos: 50.0 # useless if is_rand_arc_pos is False
     use_center_frenet_ref: True # True means use continuous frenet reference, False means use discrete reference
     n_nearing_agents_observed: 2
     # reward weights
-    reward_progress: 5.0
+    reward_progress: 20.0
     reward_vel: 0
     reward_goal: 100
-    reward_hinge: 0
-    reward_track_hinge: 0
+    reward_hinge: 100
+    reward_track_hinge: 50
     reward_track_ref_vel: 20       
-    reward_track_ref_space: 0
+    reward_track_ref_space: 50
     reward_track_ref_heading: 0
     reward_track_ref_path: 50
-    penalty_near_boundary: -200
-    penalty_near_other_agents: -200
-    penalty_change_steering: -0.0
-    penalty_change_acc: -0.0
-    penalty_collide_with_agents: -400
+    penalty_near_boundary: -100
+    penalty_near_other_agents: -100
+    penalty_change_steering: -1.0
+    penalty_change_acc: -0.001
+    penalty_collide_with_agents: -200
     penalty_outside_boundaries: -200
     penalty_backward: -100
   device: ??? # These values will be populated dynamically
@@ -66,11 +65,11 @@ train:
 
 eval:
   evaluation_interval: 10
-  evaluation_episodes: 6
+  evaluation_episodes: 13
 
 logger:
   backend: swanlab # Delete to remove logging
   project_name: "MAPPO_OCCT"
-  group_name: "ours_all_succeed"
+  group_name: "ours"
   resume_swanlab_id: None # copy from swanlab page
   mode: cloud

@@ -62,7 +62,7 @@ train:
   lr: 5e-5
   max_grad_norm: 40.0
   device: ???
-  resume_from_checkpoint: /home/yons/Graduation/rl_occt/outputs/2026-03-03/00-19-47/checkpoints/checkpoint_iter_200_frames_12060000.pt # absolute path
+  resume_from_checkpoint: /home/yons/Graduation/rl_occt/outputs/2026-03-03/17-14-18_train_aver_front_rear_ref_v/checkpoints/checkpoint_iter_90_frames_5460000.pt # absolute path
 
 eval:
   evaluation_interval: 10
