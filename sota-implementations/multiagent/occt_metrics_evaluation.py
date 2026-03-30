@@ -7,6 +7,10 @@ from typing import Any, Dict, List, Optional, Sequence
 import matplotlib.pyplot as plt
 import numpy as np
 import torch
+try:
+    import yaml
+except ImportError:
+    yaml = None
 
 from plt_cn_utils import *
 
@@ -35,6 +39,9 @@ METHOD_PLOT_ORDER = [
     "marl_baseline",
     "marl_full_obse",
     "marl_lipsnet++",
+    "marl_mlp_continuous_w_cp_his10",
+    "marl_lipsnet_continuous_his10",
+    "marl_lipsnet_phase_blending_his10",
     "marl",
     "pid",
     "mppi",
@@ -43,6 +50,10 @@ METHOD_COLORS = {
     "marl_baseline": "#1f77b4",
     "marl_full_obse": "#ff7f0e",
     "marl_lipsnet++": "#2ca02c",
+    "marl_mlp_continuous_w_cp_his10": "#d62728",
+    "marl_mlp_continues_w_cp_his10": "#d62728",
+    "marl_lipsnet_continuous_his10": "#9467bd",
+    "marl_lipsnet_phase_blending_his10": "#8c564b",
     "marl": "#1f77b4",
     "pid": "#ff7f0e",
     "mppi": "#2ca02c",
@@ -51,9 +62,16 @@ METHOD_DISPLAY_NAMES = {
     "marl_baseline": "MARL Baseline",
     "marl_full_obse": "MARL Full Obse",
     "marl_lipsnet++": "MARL LipsNet++",
+    "marl_mlp_continuous_w_cp_his10": "MLP Continuous Act Penalty (H=10)",
+    "marl_mlp_continues_w_cp_his10": "MLP Continuous Act Penalty (H=10)",
+    "marl_lipsnet_continuous_his10": "LipsNet Continue Baseline (H=10)",
+    "marl_lipsnet_phase_blending_his10": "LipsNet Phase Blending (H=10)",
     "marl": "MARL",
     "pid": "PID",
     "mppi": "MPPI",
+}
+METHOD_NAME_ALIASES = {
+    "marl_mlp_continues_w_cp_his10": "marl_mlp_continuous_w_cp_his10",
 }
 AGENT_COLORS = {
     0: "#7f7f7f",
@@ -62,6 +80,41 @@ AGENT_COLORS = {
     3: "#17becf",
     4: "#e377c2",
     5: "#bcbd22",
+}
+# PLOT_METHOD_LINE_PALETTES = {
+#     "longitudinal_error": ["#5e3c99", "#8073ac", "#b2abd2"],
+#     "lateral_error": ["#8c510a", "#bf812d", "#dfc27d"],
+#     "hinge_dis": ["#01665e", "#35978f", "#80cdc1"],
+#     "hinge_status": ["#4d9221", "#7fbc41", "#b8e186"],
+#     "speed": ["#08519c", "#3182bd", "#6baed6"],
+#     "acceleration": ["#980043", "#dd1c77", "#df65b0"],
+#     "steering_angle": ["#252525", "#636363", "#969696"],
+#     "heading_angle": ["#006d2c", "#31a354", "#74c476"],
+# }
+PLOT_METHOD_LINE_PALETTES = {
+    # Viridis 色系（青→黄→绿，顶级区分度）
+    "longitudinal_error": ["#00204d", "#4d7399", "#ffce51"],
+    
+    # Plasma 色系（紫→粉→黄，高对比）
+    "lateral_error": ["#3e0466", "#d9576e", "#f9e826"],
+    
+    # Inferno 色系（黑→红→黄）
+    "hinge_dis": ["#A519B1", "#bb3654", "#ff8f1f"],
+    
+    # Cividis 色系（蓝→黄，色盲最优）
+    "hinge_status": ["#440154", "#2a788e", "#7ad151"],
+    
+    # Blues → 科学色（深蓝→青）
+    "speed": ["#08306b", "#2c81c9", "#9ac9e3"],
+    
+    # Rocket 色系（深棕→红）
+    "acceleration": ["#251014", "#b5396b", "#f7a18d"],
+    
+    # Greys 专业灰度
+    "steering_angle": ["#1a1a1a", "#737373", "#d9d9d9"],
+    
+    # Turbid 清爽蓝绿
+    "heading_angle": ["#2d5a70", "#41b399", "#9fd799"],
 }
 
 
@@ -94,12 +147,27 @@ def _safe_std(values: List[float]) -> float:
     return float(torch.tensor(values, dtype=torch.float32).std(unbiased=False).item())
 
 
+def _safe_min(values: List[float]) -> float:
+    if not values:
+        return float("nan")
+    return float(min(values))
+
+
+def _safe_max(values: List[float]) -> float:
+    if not values:
+        return float("nan")
+    return float(max(values))
+
+
 def _normalize_method_name(name: str) -> str:
-    return name.strip().lower()
+    normalized = name.strip().lower()
+    return METHOD_NAME_ALIASES.get(normalized, normalized)
 
 
 def _get_method_display_name(method: str) -> str:
-    return METHOD_DISPLAY_NAMES.get(method, method.upper())
+    if method in METHOD_DISPLAY_NAMES:
+        return METHOD_DISPLAY_NAMES[method]
+    return method.replace("_", " ")
 
 
 def _infer_rollout_method_name(input_path: Path, label: Optional[str] = None) -> str:
@@ -107,6 +175,24 @@ def _infer_rollout_method_name(input_path: Path, label: Optional[str] = None) ->
         return _normalize_method_name(label)
 
     path_text = input_path.as_posix().lower()
+    if (
+        "phase_blending_his10" in path_text
+        or "phase-blending-his10" in path_text
+        or "phase_blending" in path_text
+    ):
+        return "marl_lipsnet_phase_blending_his10"
+    if (
+        "lipsnet_continuous_his10" in path_text
+        or "lipsnet-continuous-his10" in path_text
+        or "continuous_his10" in path_text
+    ):
+        return "marl_lipsnet_continuous_his10"
+    if (
+        "mlp_continues_w_cp_his10" in path_text
+        or "mlp-continues-w-cp-his10" in path_text
+        or "continues_w_cp_his10" in path_text
+    ):
+        return "marl_mlp_continues_w_cp_his10"
     if "lipsnet++" in path_text or "lipsnetpp" in path_text or "lipsnet" in path_text:
         return "marl_lipsnet++"
     if (
@@ -136,6 +222,17 @@ def _resolve_method_name(requested: str, available_methods: Sequence[str]) -> st
         )
     raise ValueError(
         f"Method '{requested}' not found in loaded inputs. Available methods: {sorted(available)}"
+    )
+
+
+def _str_to_bool(value: str) -> bool:
+    normalized = str(value).strip().lower()
+    if normalized in {"1", "true", "t", "yes", "y", "on"}:
+        return True
+    if normalized in {"0", "false", "f", "no", "n", "off"}:
+        return False
+    raise argparse.ArgumentTypeError(
+        f"Invalid boolean value '{value}'. Use true or false."
     )
 
 
@@ -378,9 +475,9 @@ def compute_validation_metrics_from_object(
     platoon_back = []
     platoon_lateral_tracking_errors = []
     platoon_ttc_episode_mins = []
-    control_acc_episode_means = []
-    control_jerk_episode_means = []
-    control_steering_rate_episode_means = []
+    control_acc_abs_values = []
+    control_jerk_abs_values = []
+    control_steering_rate_abs_values = []
 
     hinge_times = []
     hinge_speed_diffs = []
@@ -441,9 +538,6 @@ def compute_validation_metrics_from_object(
             else None
         )
 
-        episode_acc_values = []
-        episode_jerk_values = []
-        episode_steering_rate_values = []
         for follower_idx, agent_id in enumerate(resolved_followers):
             active_control_mask = ~agent_hinge_status[:, follower_idx]
             if not active_control_mask.any():
@@ -469,23 +563,18 @@ def compute_validation_metrics_from_object(
                     * (180.0 / torch.pi)
                 )
 
-            episode_acc_values.append(
-                float(acc_series[active_control_mask].abs().mean().item())
+            control_acc_abs_values.extend(
+                acc_series[active_control_mask].abs().detach().cpu().tolist()
             )
-            episode_jerk_values.append(
-                float(jerk_series[active_control_mask].abs().mean().item())
+            control_jerk_abs_values.extend(
+                jerk_series[active_control_mask].abs().detach().cpu().tolist()
             )
-            episode_steering_rate_values.append(
-                float(steering_rate_abs_series[active_control_mask].mean().item())
-            )
-
-        if episode_acc_values:
-            control_acc_episode_means.append(float(np.mean(episode_acc_values)))
-        if episode_jerk_values:
-            control_jerk_episode_means.append(float(np.mean(episode_jerk_values)))
-        if episode_steering_rate_values:
-            control_steering_rate_episode_means.append(
-                float(np.mean(episode_steering_rate_values))
+            control_steering_rate_abs_values.extend(
+                steering_rate_abs_series[active_control_mask]
+                .abs()
+                .detach()
+                .cpu()
+                .tolist()
             )
 
         platoon_mask = ~hinge_status
@@ -660,38 +749,40 @@ def compute_validation_metrics_from_object(
         "dt": resolved_dt,
         # "platoon_follow_error_abs_mean": _safe_mean(platoon_abs_all),
         # "platoon_follow_error_abs_std": _safe_std(platoon_abs_all),
-        "platoon_follow_s_error_abs_mean": _safe_mean(platoon_front),
-        "platoon_follow_s_error_abs_std": _safe_std(platoon_front),
-        "platoon_lateral_tracking_error_mean": _safe_mean(
+        "s_error_mean": _safe_mean(platoon_front),
+        "s_error_std": _safe_std(platoon_front),
+        "la_error_mean": _safe_mean(
             platoon_lateral_tracking_errors
         ),
-        "platoon_lateral_tracking_error_std": _safe_std(
+        "la_error_std": _safe_std(
             platoon_lateral_tracking_errors
         ),
         # "platoon_follow_back_error_abs_mean": _safe_mean(platoon_back),
         # "platoon_follow_back_error_abs_std": _safe_std(platoon_back),
-        "platoon_ttc_min_mean": _safe_mean(platoon_ttc_episode_mins),
-        "platoon_ttc_min_std": _safe_std(platoon_ttc_episode_mins),
-        "platoon_ttc_global_min": (
+        "ttc_min_mean": _safe_mean(platoon_ttc_episode_mins),
+        "ttc_min_std": _safe_std(platoon_ttc_episode_mins),
+        "ttc_global_min": (
             min(platoon_ttc_episode_mins)
             if platoon_ttc_episode_mins
             else float("nan")
         ),
-        "platoon_ttc_valid_episode_count": len(platoon_ttc_episode_mins),
-        "control_longitudinal_acc_abs_mean": _safe_mean(control_acc_episode_means),
-        "control_longitudinal_acc_abs_std": _safe_std(control_acc_episode_means),
-        "control_longitudinal_jerk_abs_mean": _safe_mean(control_jerk_episode_means),
-        "control_longitudinal_jerk_abs_std": _safe_std(control_jerk_episode_means),
-        "control_steering_rate_abs_deg_mean": _safe_mean(
-            control_steering_rate_episode_means
-        ),
-        "control_steering_rate_abs_deg_std": _safe_std(
-            control_steering_rate_episode_means
-        ),
-        "hinge_time_sec_mean": _safe_mean(hinge_times),
-        "hinge_time_sec_std": _safe_std(hinge_times),
-        "hinge_instant_speed_diff_mean": _safe_mean(hinge_speed_diffs),
-        "hinge_instant_speed_diff_std": _safe_std(hinge_speed_diffs),
+        "ttc_valid_episode_count": len(platoon_ttc_episode_mins),
+        "acc_mean": _safe_mean(control_acc_abs_values),
+        "acc_min": _safe_min(control_acc_abs_values),
+        "acc_max": _safe_max(control_acc_abs_values),
+        "acc_std": _safe_std(control_acc_abs_values),
+        "jerk_mean": _safe_mean(control_jerk_abs_values),
+        "jerk_min": _safe_min(control_jerk_abs_values),
+        "jerk_max": _safe_max(control_jerk_abs_values),
+        "jerk_std": _safe_std(control_jerk_abs_values),
+        "ste_rate_mean": _safe_mean(control_steering_rate_abs_values),
+        "ste_rate_min": _safe_min(control_steering_rate_abs_values),
+        "ste_rate_max": _safe_max(control_steering_rate_abs_values),
+        "ste_rate_std": _safe_std(control_steering_rate_abs_values),
+        "hinge_time_mean": _safe_mean(hinge_times),
+        "hinge_time_std": _safe_std(hinge_times),
+        "hinge_spe_diff_mean": _safe_mean(hinge_speed_diffs),
+        "hinge_spe_diff_std": _safe_std(hinge_speed_diffs),
         # "hinge_pre_dock_vel_angle_diff_deg_mean": _safe_mean(
         #     hinge_pre_dock_vel_angle_diffs
         # ),
@@ -704,8 +795,8 @@ def compute_validation_metrics_from_object(
         # "hinge_instant_angle_diff_deg_std": _safe_std(
         #     hinge_pre_dock_vel_angle_diffs
         # ),
-        "hinge_gate_angle_diff_deg_mean": _safe_mean(hinge_gate_angle_diffs),
-        "hinge_gate_angle_diff_deg_std": _safe_std(hinge_gate_angle_diffs),
+        "hinge_ang_diff_mean": _safe_mean(hinge_gate_angle_diffs),
+        "hinge_ang_diff_std": _safe_std(hinge_gate_angle_diffs),
         "hinge_success_event_count": len(hinge_times),
         "success_rate": (
             float(sum(success_flags) / total_episodes) if total_episodes > 0 else float("nan")
@@ -798,6 +889,103 @@ def _serialize_csv_value(value: Any) -> Any:
     if isinstance(value, (list, tuple, set)):
         return ",".join(str(item) for item in value)
     return str(value)
+
+
+def _parse_simple_rollout_yaml(config_path: Path) -> Dict[str, str]:
+    config: Dict[str, str] = {}
+    current_key: Optional[str] = None
+    for raw_line in config_path.read_text(encoding="utf-8").splitlines():
+        line = raw_line.rstrip()
+        stripped = line.strip()
+        if not stripped or stripped.startswith("#"):
+            continue
+        if not raw_line.startswith((" ", "\t")) and stripped.endswith(":"):
+            current_key = _normalize_method_name(stripped[:-1])
+            continue
+        if current_key is None:
+            continue
+        if stripped.startswith("rollout_path:"):
+            rollout_path = stripped.split(":", 1)[1].strip().strip("'\"")
+            config[current_key] = rollout_path
+            current_key = None
+    return config
+
+
+def _load_method_rollout_config(data_dir: Path) -> Dict[str, str]:
+    config_path = data_dir / "rollout_path.yaml"
+    if not config_path.exists():
+        raise FileNotFoundError(f"rollout_path.yaml not found in {data_dir}")
+
+    if yaml is not None:
+        loaded = yaml.safe_load(config_path.read_text(encoding="utf-8")) or {}
+        if not isinstance(loaded, dict):
+            raise ValueError(f"Invalid rollout_path.yaml format in {config_path}")
+        config = {}
+        for method_name, method_info in loaded.items():
+            if not isinstance(method_info, dict) or "rollout_path" not in method_info:
+                raise ValueError(
+                    f"Method '{method_name}' in {config_path} must contain rollout_path."
+                )
+            config[_normalize_method_name(str(method_name))] = str(
+                method_info["rollout_path"]
+            ).strip()
+        return config
+
+    config = _parse_simple_rollout_yaml(config_path)
+    if not config:
+        raise ValueError(
+            f"Unable to parse rollout_path.yaml without PyYAML: {config_path}"
+        )
+    return config
+
+
+def _resolve_method_source_path(data_dir: Path, relative_path: str) -> Path:
+    candidate = Path(relative_path)
+    return candidate if candidate.is_absolute() else (data_dir / candidate)
+
+
+def _resolve_method_output_root(source_path: Path) -> Path:
+    if source_path.is_dir():
+        return source_path
+    if source_path.parent.name == "rollouts":
+        return source_path.parent.parent
+    return source_path.parent
+
+
+def _load_single_method_datasets(
+    *,
+    method: str,
+    source_path: Path,
+    followers: Optional[List[int]],
+    dt: Optional[float],
+) -> List[Dict[str, Any]]:
+    if method in {"pid", "mppi"}:
+        input_paths = resolve_input_paths([str(source_path)])
+        datasets_by_method = _collect_method_datasets(
+            input_paths,
+            forced_format="validation",
+            followers=followers,
+            dt=dt,
+            labels=[method] * len(input_paths),
+        )
+    else:
+        if not source_path.exists():
+            raise FileNotFoundError(f"Rollout file not found: {source_path}")
+        datasets_by_method = _collect_method_datasets(
+            [source_path],
+            forced_format="rollout",
+            followers=followers,
+            dt=dt,
+            labels=[method],
+        )
+
+    normalized_method = _normalize_method_name(method)
+    if normalized_method not in datasets_by_method:
+        raise ValueError(
+            f"Loaded method '{normalized_method}' not found. "
+            f"Available methods: {sorted(datasets_by_method.keys())}"
+        )
+    return datasets_by_method[normalized_method]
 
 
 def _default_report_dir() -> Path:
@@ -1014,6 +1202,94 @@ def _write_method_csv(report_dir: Path, method: str, report_groups: Dict[str, Li
     return csv_path
 
 
+def _find_method_report_csv(data_dir: Path, method: str) -> Path:
+    normalized_method = _normalize_method_name(method)
+    matches = sorted(data_dir.glob(f"**/table/{normalized_method}_reports.csv"))
+    if not matches:
+        raise FileNotFoundError(
+            f"No CSV report found for method '{normalized_method}' under {data_dir}"
+        )
+    if len(matches) > 1:
+        raise ValueError(
+            f"Multiple CSV reports found for method '{normalized_method}': "
+            f"{[str(path) for path in matches]}"
+        )
+    return matches[0]
+
+
+def _load_method_report_rows(report_csv_path: Path) -> List[Dict[str, str]]:
+    with report_csv_path.open("r", encoding="utf-8", newline="") as fp:
+        return list(csv.DictReader(fp))
+
+
+def _select_comparison_row(
+    rows: List[Dict[str, str]],
+    *,
+    report_type: str,
+    road_type: Optional[str] = None,
+) -> Dict[str, str]:
+    for row in rows:
+        if row.get("report_type") != report_type:
+            continue
+        if road_type is not None and row.get("road_type") != road_type:
+            continue
+        return row
+    raise ValueError(
+        f"No row found for report_type='{report_type}', road_type='{road_type}'."
+    )
+
+
+def _write_comparison_csv(output_path: Path, rows: List[Dict[str, str]]) -> Path:
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    fieldnames: List[str] = []
+    for row in rows:
+        for key in row.keys():
+            if key not in fieldnames:
+                fieldnames.append(key)
+
+    with output_path.open("w", encoding="utf-8", newline="") as fp:
+        writer = csv.DictWriter(fp, fieldnames=fieldnames)
+        writer.writeheader()
+        for row in rows:
+            writer.writerow({key: _serialize_csv_value(row.get(key)) for key in fieldnames})
+    return output_path
+
+
+def generate_comparison_csvs(
+    *,
+    data_dir: Path,
+    methods: Sequence[str],
+) -> List[Path]:
+    normalized_methods = _ordered_methods([_normalize_method_name(method) for method in methods])
+    report_rows_by_method: Dict[str, List[Dict[str, str]]] = {}
+    for method in normalized_methods:
+        report_csv_path = _find_method_report_csv(data_dir, method)
+        report_rows_by_method[method] = _load_method_report_rows(report_csv_path)
+
+    comparison_specs = [
+        ("comparison_roundabout.csv", "road_type", "roundabout"),
+        ("comparison_right_angle_turn.csv", "road_type", "right_angle_turn"),
+        ("comparison_s_curve.csv", "road_type", "s_curve"),
+        ("comparison_overall.csv", "overall", None),
+    ]
+
+    saved_paths: List[Path] = []
+    for file_name, report_type, road_type in comparison_specs:
+        rows: List[Dict[str, str]] = []
+        for method in normalized_methods:
+            selected_row = dict(
+                _select_comparison_row(
+                    report_rows_by_method[method],
+                    report_type=report_type,
+                    road_type=road_type,
+                )
+            )
+            selected_row["display_name"] = _get_method_display_name(method)
+            rows.append(selected_row)
+        saved_paths.append(_write_comparison_csv(data_dir / file_name, rows))
+    return saved_paths
+
+
 def _print_report_group(method: str, report_type: str, rows: List[Dict[str, Any]]) -> None:
     display_name = _get_method_display_name(method)
     print(f"\n##### {display_name} {report_type} #####")
@@ -1050,6 +1326,15 @@ def _get_agent_color(agent_id: int) -> str:
     return AGENT_COLORS.get(agent_id, "#4C72B0")
 
 
+def _get_plot_method_line_palette(metric_key: str, count: int) -> List[str]:
+    palette = PLOT_METHOD_LINE_PALETTES.get(metric_key)
+    if palette is None:
+        return [_get_agent_color(agent_id) for agent_id in range(count)]
+    if len(palette) >= count:
+        return palette[:count]
+    return [palette[idx % len(palette)] for idx in range(count)]
+
+
 def _default_plot_dir() -> Path:
     return DEFAULT_PLOT_DIR
 
@@ -1057,13 +1342,17 @@ def _default_plot_dir() -> Path:
 def _style_cn_axes(
     ax,
     *,
-    title: str,
-    y_label: str,
+    title: str = None,
+    y_label: str = None,
+    x_label: str = "时间 (s)",
     show_legend: bool = True,
 ) -> None:
-    ax.set_title(title, fontproperties=font_prop_chinese, fontsize=font_size_title)
-    ax.set_ylabel(y_label, fontproperties=font_prop_chinese, fontsize=font_size_label)
-    ax.set_xlabel("时间 (s)", fontproperties=font_prop_chinese, fontsize=font_size_label)
+    if title:
+        ax.set_title(title, fontproperties=font_prop_chinese, fontsize=font_size_title)
+    if y_label:
+        ax.set_ylabel(y_label, fontproperties=font_prop_chinese, fontsize=font_size_label)
+    if x_label:
+        ax.set_xlabel(x_label, fontproperties=font_prop_chinese, fontsize=font_size_label)
     ax.tick_params(
         axis="both",
         labelsize=font_size_tick,
@@ -1205,6 +1494,14 @@ def _extract_steer_series(episode: Dict[str, Any], agent_id: int) -> torch.Tenso
     return steer_series * (180.0 / np.pi)
 
 
+def _extract_heading_series(episode: Dict[str, Any], agent_id: int) -> torch.Tensor:
+    heading_series = _flatten_scalar_series(_extract_agent_series(episode, "rot", agent_id))
+    heading_np = heading_series.detach().cpu().numpy()
+    heading_np = np.unwrap(heading_np)
+    heading_deg = np.rad2deg(heading_np)
+    return torch.as_tensor(heading_deg, dtype=torch.float32)
+
+
 def _extract_steering_rate_series(
     episode: Dict[str, Any], agent_id: int, *, dt: float
 ) -> torch.Tensor:
@@ -1270,6 +1567,81 @@ def _plot_mean_band_metric_pdf(
     return output_path
 
 
+def _plot_plot_method_metric_pdf(
+    *,
+    time_axis: np.ndarray,
+    value_matrix: np.ndarray,
+    agent_ids: Sequence[int],
+    palette_key: str,
+    title: Optional[str] = None,
+    y_label: str,
+    output_path: Path,
+    fill_style: bool,
+    fill_color: str,
+    y_limits: Optional[tuple[float, float]] = None,
+    background_mask: Optional[np.ndarray] = None,
+    background_dt: Optional[float] = None,
+    background_label: str = "阶段",
+) -> Path:
+    fig, ax = plt.subplots(1, 1, figsize=(3, 2), constrained_layout=True)
+
+    background_handle = None
+    if background_mask is not None and background_dt is not None:
+        background_handle = _shade_boolean_background(
+            ax,
+            torch.as_tensor(background_mask, dtype=torch.bool),
+            background_dt,
+            label=background_label,
+        )
+
+    if fill_style:
+        _draw_fill_band(
+            ax,
+            time_axis=time_axis,
+            center_values=np.mean(value_matrix, axis=1),
+            upper_values=np.max(value_matrix, axis=1),
+            lower_values=np.min(value_matrix, axis=1),
+            color=fill_color,
+            mean_label="车辆1-3均值",
+            band_label="车辆1-3波动带",
+        )
+    else:
+        line_colors = _get_plot_method_line_palette(palette_key, len(agent_ids))
+        for idx, agent_id in enumerate(agent_ids):
+            ax.plot(
+                time_axis,
+                value_matrix[:, idx],
+                label=f"车辆{agent_id}",
+                linewidth=1.2,
+                color=line_colors[idx],
+                alpha=0.95,
+            )
+
+    if y_limits is not None:
+        ax.set_ylim(*y_limits)
+
+    if background_handle is not None:
+        handles, labels = ax.get_legend_handles_labels()
+        handles.append(background_handle)
+        labels.append(background_label)
+        ax.legend(
+            handles,
+            labels,
+            loc="best",
+            fontsize=font_size_legend,
+            prop=font_prop_chinese,
+            handlelength=1.8,
+            borderpad=0.2,
+            labelspacing=0.2,
+        )
+        _style_cn_axes(ax, title=title, y_label=y_label, show_legend=False)
+    else:
+        _style_cn_axes(ax, title=title, y_label=y_label, show_legend=True)
+
+    _save_pdf_figure(fig, output_path)
+    return output_path
+
+
 def _build_series_specs_from_agents(
     *,
     episode: Dict[str, Any],
@@ -1302,6 +1674,7 @@ def plot_representative_road_curves(
     dt: Optional[float],
     plot_dir: Path,
     road_ids: Sequence[int] = (0,),
+    plot_method_fill_stype: bool = True,
 ) -> List[Path]:
     _, episodes_by_road, resolved_dt, resolved_followers = _prepare_method_episode_groups(
         datasets,
@@ -1329,12 +1702,11 @@ def plot_representative_road_curves(
         num_agents = _infer_num_agents(episode)
         error_agent_ids = _filter_valid_agent_ids(resolved_followers, num_agents)
         hinge_agent_ids = _filter_valid_agent_ids(resolved_followers, num_agents)
-        speed_group_agent_ids = _filter_valid_agent_ids([1, 2, 3], num_agents)
-        speed_edge_agent_ids = _filter_valid_agent_ids([0, 4], num_agents)
         control_agent_ids = _filter_valid_agent_ids([1, 2, 3], num_agents)
         time_axis = (
             torch.arange(int(episode["num_steps"]), dtype=torch.float32) * resolved_dt
         ).numpy()
+        style_suffix = "fill" if plot_method_fill_stype else "lines"
 
         longitudinal_values = (
             episode["info"]["error_space"][:, error_agent_ids, 0]
@@ -1345,18 +1717,19 @@ def plot_representative_road_curves(
         )
         longitudinal_path = plot_dir / (
             f"longitudinal_error_{method}_road{road_id}_"
-            f"{_format_agent_suffix(error_agent_ids)}_meanband.pdf"
+            f"{_format_agent_suffix(error_agent_ids)}_{style_suffix}.pdf"
         )
         saved_paths.append(
-            _plot_mean_band_metric_pdf(
+            _plot_plot_method_metric_pdf(
                 time_axis=time_axis,
                 value_matrix=longitudinal_values,
-                title=f"{method_label} 道路{road_id} 编队纵向误差",
+                agent_ids=error_agent_ids,
+                palette_key="longitudinal_error",
+                #title=f"{method_label} 道路{road_id} 编队纵向误差",
                 y_label="纵向误差 (m)",
                 output_path=longitudinal_path,
-                color="#9467bd",
-                mean_label="车辆1-3均值",
-                band_label="车辆1-3波动带",
+                fill_style=plot_method_fill_stype,
+                fill_color="#9467bd",
             )
         )
 
@@ -1365,26 +1738,22 @@ def plot_representative_road_curves(
         ).float().detach().cpu().numpy()
         lateral_path = plot_dir / (
             f"lateral_error_{method}_road{road_id}_"
-            f"{_format_agent_suffix(error_agent_ids)}_meanband.pdf"
+            f"{_format_agent_suffix(error_agent_ids)}_{style_suffix}.pdf"
         )
         saved_paths.append(
-            _plot_mean_band_metric_pdf(
+            _plot_plot_method_metric_pdf(
                 time_axis=time_axis,
                 value_matrix=lateral_values,
-                title=f"{method_label} 道路{road_id} 编队横向误差",
+                agent_ids=error_agent_ids,
+                palette_key="lateral_error",
+                #title=f"{method_label} 道路{road_id} 编队横向误差",
                 y_label="横向误差 (m)",
                 output_path=lateral_path,
-                color="#8c564b",
-                mean_label="车辆1-3均值",
-                band_label="车辆1-3波动带",
+                fill_style=plot_method_fill_stype,
+                fill_color="#8c564b",
             )
         )
 
-        hinge_path = plot_dir / (
-            f"hinge_dis_{method}_road{road_id}_"
-            f"{_format_agent_suffix(hinge_agent_ids)}.pdf"
-        )
-        fig, ax = plt.subplots(1, 1, figsize=(3, 2), constrained_layout=True)
         hinge_phase_mask = _extract_agent_series(
             episode, "hinge_status", hinge_agent_ids[0]
         ).bool()
@@ -1392,176 +1761,165 @@ def plot_representative_road_curves(
             hinge_phase_mask |= _extract_agent_series(
                 episode, "hinge_status", agent_id
             ).bool()
-        background_handle = _shade_boolean_background(
-            ax,
-            hinge_phase_mask,
-            resolved_dt,
-            label="铰接阶段",
-        )
-        for agent_id in hinge_agent_ids:
-            hinge_distance = _extract_hinge_distance_series(episode, agent_id)
-            ax.plot(
-                time_axis,
-                hinge_distance.detach().cpu().numpy(),
-                label=f"车辆{agent_id}",
-                linewidth=1.2,
-                color=_get_agent_color(agent_id),
-                alpha=0.95,
-            )
-        if background_handle is not None:
-            handles, labels = ax.get_legend_handles_labels()
-            handles.append(background_handle)
-            labels.append("铰接阶段")
-            ax.legend(
-                handles,
-                labels,
-                loc="best",
-                fontsize=font_size_legend,
-                prop=font_prop_chinese,
-                handlelength=1.8,
-                borderpad=0.2,
-                labelspacing=0.2,
-            )
-            _style_cn_axes(
-                ax,
-                title=f"{method_label} 道路{road_id} 铰接距离",
-                y_label="铰接距离 (m)",
-                show_legend=False,
-            )
-        else:
-            _style_cn_axes(
-                ax,
-                title=f"{method_label} 道路{road_id} 铰接距离",
-                y_label="铰接距离 (m)",
-                show_legend=True,
-            )
-        _save_pdf_figure(fig, hinge_path)
-        saved_paths.append(hinge_path)
-
-        hinge_status_specs = [
-            {
-                "label": f"车辆{agent_id}",
-                "values": _extract_agent_series(episode, "hinge_status", agent_id)
-                .float()
-                .detach()
-                .cpu()
-                .numpy(),
-                "color": _get_agent_color(agent_id),
-            }
-            for agent_id in hinge_agent_ids
-        ]
-        hinge_status_path = plot_dir / (
-            f"hinge_status_{method}_road{road_id}_"
-            f"{_format_agent_suffix(hinge_agent_ids)}.pdf"
-        )
-        fig, ax = plt.subplots(1, 1, figsize=(3, 2), constrained_layout=True)
-        for spec in hinge_status_specs:
-            ax.plot(
-                time_axis,
-                spec["values"],
-                label=spec["label"],
-                linewidth=1.2,
-                color=spec["color"],
-                alpha=0.95,
-            )
-        ax.set_ylim(-0.05, 1.05)
-        _style_cn_axes(
-            ax,
-            title=f"{method_label} 道路{road_id} 铰接状态",
-            y_label="铰接状态",
-            show_legend=True,
-        )
-        _save_pdf_figure(fig, hinge_status_path)
-        saved_paths.append(hinge_status_path)
-
-        speed_specs = [
-            {
-                "label": f"车辆{agent_id}",
-                "values": _extract_speed_series(episode, agent_id).detach().cpu().numpy(),
-                "color": _get_agent_color(agent_id),
-            }
-            for agent_id in speed_edge_agent_ids
-        ]
-        speed_group_matrix = np.stack(
+        hinge_distance_matrix = np.stack(
             [
-                _extract_speed_series(episode, agent_id).detach().cpu().numpy()
-                for agent_id in speed_group_agent_ids
+                _extract_hinge_distance_series(episode, agent_id).detach().cpu().numpy()
+                for agent_id in hinge_agent_ids
             ],
             axis=1,
         )
-        speed_specs = [
-            {
-                "label": "车辆1-3均值",
-                "values": np.mean(speed_group_matrix, axis=1),
-                "color": "#17becf",
-            },
-            *speed_specs,
-        ]
+        hinge_path = plot_dir / (
+            f"hinge_dis_{method}_road{road_id}_"
+            f"{_format_agent_suffix(hinge_agent_ids)}_{style_suffix}.pdf"
+        )
+        saved_paths.append(
+            _plot_plot_method_metric_pdf(
+                time_axis=time_axis,
+                value_matrix=hinge_distance_matrix,
+                agent_ids=hinge_agent_ids,
+                palette_key="hinge_dis",
+                #title=f"{method_label} 道路{road_id} 铰接距离",
+                y_label="铰接距离 (m)",
+                output_path=hinge_path,
+                fill_style=plot_method_fill_stype,
+                fill_color="#17becf",
+                y_limits=(0.0, float(np.max(hinge_distance_matrix)) + 0.2),
+                background_mask=hinge_phase_mask.detach().cpu().numpy(),
+                background_dt=resolved_dt,
+                background_label="铰接可用",
+            )
+        )
+
+        hinge_status_matrix = np.stack(
+            [
+                _extract_agent_series(episode, "hinge_status", agent_id)
+                .float()
+                .detach()
+                .cpu()
+                .numpy()
+                for agent_id in hinge_agent_ids
+            ],
+            axis=1,
+        )
+        hinge_status_path = plot_dir / (
+            f"hinge_status_{method}_road{road_id}_"
+            f"{_format_agent_suffix(hinge_agent_ids)}_{style_suffix}.pdf"
+        )
+        saved_paths.append(
+            _plot_plot_method_metric_pdf(
+                time_axis=time_axis,
+                value_matrix=hinge_status_matrix,
+                agent_ids=hinge_agent_ids,
+                palette_key="hinge_status",
+                #title=f"{method_label} 道路{road_id} 铰接状态",
+                y_label="铰接状态",
+                output_path=hinge_status_path,
+                fill_style=plot_method_fill_stype,
+                fill_color="#bcbd22",
+                y_limits=(-0.05, 1.05),
+            )
+        )
+
+        speed_matrix = np.stack(
+            [
+                _extract_speed_series(episode, agent_id).detach().cpu().numpy()
+                for agent_id in control_agent_ids
+            ],
+            axis=1,
+        )
         speed_path = plot_dir / (
             f"speed_{method}_road{road_id}_"
-            f"{_format_agent_suffix(speed_edge_agent_ids)}_"
-            f"{_format_agent_suffix(speed_group_agent_ids)}_meanband.pdf"
+            f"{_format_agent_suffix(control_agent_ids)}_{style_suffix}.pdf"
         )
-        fig, ax = plt.subplots(1, 1, figsize=(3, 2), constrained_layout=True)
-        _draw_fill_band(
-            ax,
-            time_axis=time_axis,
-            center_values=np.mean(speed_group_matrix, axis=1),
-            upper_values=np.max(speed_group_matrix, axis=1),
-            lower_values=np.min(speed_group_matrix, axis=1),
-            color="#17becf",
-            mean_label="车辆1-3均值",
-            band_label="车辆1-3波动带",
-        )
-        for spec in speed_specs[1:]:
-            ax.plot(
-                time_axis,
-                spec["values"],
-                label=spec["label"],
-                linewidth=1.2,
-                color=spec["color"],
-                alpha=0.95,
+        saved_paths.append(
+            _plot_plot_method_metric_pdf(
+                time_axis=time_axis,
+                value_matrix=speed_matrix,
+                agent_ids=control_agent_ids,
+                palette_key="speed",
+                #title=f"{method_label} 道路{road_id} 车辆速度",
+                y_label="速度 (m/s)",
+                output_path=speed_path,
+                fill_style=plot_method_fill_stype,
+                fill_color="#17becf",
             )
-        _style_cn_axes(ax, title=f"{method_label} 道路{road_id} 车辆速度", y_label="速度 (m/s)", show_legend=True)
-        _save_pdf_figure(fig, speed_path)
-        saved_paths.append(speed_path)
+        )
 
-        acceleration_specs = _build_series_specs_from_agents(
-            episode=episode,
-            agent_ids=control_agent_ids,
-            extractor=_extract_acc_series,
-            dt=resolved_dt,
+        acceleration_matrix = np.stack(
+            [
+                _extract_acc_series(episode, agent_id, dt=resolved_dt)
+                .detach()
+                .cpu()
+                .numpy()
+                for agent_id in control_agent_ids
+            ],
+            axis=1,
         )
         acceleration_path = plot_dir / (
             f"acceleration_{method}_road{road_id}_"
-            f"{_format_agent_suffix(control_agent_ids)}.pdf"
+            f"{_format_agent_suffix(control_agent_ids)}_{style_suffix}.pdf"
         )
         saved_paths.append(
-            _plot_single_metric_pdf(
+            _plot_plot_method_metric_pdf(
                 time_axis=time_axis,
-                series_specs=acceleration_specs,
-                title=f"{method_label} 道路{road_id} 车辆加速度",
+                value_matrix=acceleration_matrix,
+                agent_ids=control_agent_ids,
+                palette_key="acceleration",
+                #title=f"{method_label} 道路{road_id} 车辆加速度",
                 y_label="加速度 (m/s^2)",
                 output_path=acceleration_path,
+                fill_style=plot_method_fill_stype,
+                fill_color="#e377c2",
             )
         )
 
-        steering_specs = _build_series_specs_from_agents(
-            episode=episode,
-            agent_ids=control_agent_ids,
-            extractor=_extract_steer_series,
+        steering_matrix = np.stack(
+            [
+                _extract_steer_series(episode, agent_id).detach().cpu().numpy()
+                for agent_id in control_agent_ids
+            ],
+            axis=1,
         )
         steering_path = plot_dir / (
             f"steering_angle_{method}_road{road_id}_"
-            f"{_format_agent_suffix(control_agent_ids)}.pdf"
+            f"{_format_agent_suffix(control_agent_ids)}_{style_suffix}.pdf"
         )
         saved_paths.append(
-            _plot_single_metric_pdf(
+            _plot_plot_method_metric_pdf(
                 time_axis=time_axis,
-                series_specs=steering_specs,
-                title=f"{method_label} 道路{road_id} 前轮转角",
+                value_matrix=steering_matrix,
+                agent_ids=control_agent_ids,
+                palette_key="steering_angle",
+                #title=f"{method_label} 道路{road_id} 前轮转角",
                 y_label="前轮转角 (deg)",
                 output_path=steering_path,
+                fill_style=plot_method_fill_stype,
+                fill_color="#7f7f7f",
+            )
+        )
+
+        heading_matrix = np.stack(
+            [
+                _extract_heading_series(episode, agent_id).detach().cpu().numpy()
+                for agent_id in control_agent_ids
+            ],
+            axis=1,
+        )
+        heading_path = plot_dir / (
+            f"heading_angle_{method}_road{road_id}_"
+            f"{_format_agent_suffix(control_agent_ids)}_{style_suffix}.pdf"
+        )
+        saved_paths.append(
+            _plot_plot_method_metric_pdf(
+                time_axis=time_axis,
+                value_matrix=heading_matrix,
+                agent_ids=control_agent_ids,
+                palette_key="heading_angle",
+                #title=f"{method_label} 道路{road_id} 车辆航向角",
+                y_label="航向角 (deg)",
+                output_path=heading_path,
+                fill_style=plot_method_fill_stype,
+                fill_color="#1f77b4",
             )
         )
 
@@ -2001,10 +2359,7 @@ def plot_overall_metric_bars(
 
 
 def _ordered_methods(methods: Sequence[str]) -> List[str]:
-    unique_methods = list(dict.fromkeys(methods))
-    prioritized = [method for method in METHOD_PLOT_ORDER if method in unique_methods]
-    remainder = sorted([method for method in unique_methods if method not in prioritized])
-    return prioritized + remainder
+    return list(dict.fromkeys(methods))
 
 
 def _get_method_color(method: str) -> str:
@@ -2217,29 +2572,35 @@ def resolve_input_paths(paths: Sequence[str]) -> List[Path]:
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description=(
-            "Compute OCCT metrics from saved rollout .pt files or from "
-            "traditional PID/MPPI validation result files."
+            "Read rollout_path.yaml under --data-dir and generate per-method "
+            "OCCT figures and CSV tables."
         )
     )
     parser.add_argument(
-        "paths",
-        nargs="*",
+        "--data-dir",
+        type=Path,
+        default=Path("outputs/occt_comparision/action_smooth_comparision"),
         help=(
-            "Result .pt files or directories. Defaults to the OCCT traditional "
-            "validation result directory."
+            "Directory containing rollout_path.yaml and all method result paths. "
+            "Defaults to outputs/occt_comparision/action_smooth_comparision."
         ),
     )
     parser.add_argument(
-        "--labels",
-        nargs="*",
+        "--method",
+        type=str,
         default=None,
-        help="Optional labels aligned with the resolved input files.",
+        help=(
+            "Optional method key from rollout_path.yaml. If omitted, process all methods."
+        ),
     )
     parser.add_argument(
-        "--format",
-        choices=["auto", "rollout", "validation"],
-        default="auto",
-        help="Force the input format or let the script detect it automatically.",
+        "--compare-methods",
+        nargs="+",
+        default=None,
+        help=(
+            "Optional method keys used to merge existing per-method CSVs into "
+            "comparison CSVs under --data-dir."
+        ),
     )
     parser.add_argument(
         "--followers",
@@ -2255,33 +2616,15 @@ def parse_args() -> argparse.Namespace:
         help="Optional dt override. Defaults to file metadata or 0.05.",
     )
     parser.add_argument(
-        "--save-json",
-        type=Path,
-        default=None,
-        help="Optional path used to save all computed metrics as JSON.",
-    )
-    parser.add_argument(
-        "--report-dir",
-        type=Path,
-        default=None,
+        "--plot-method-fill-stype",
+        "--plot-method-fill-style",
+        type=_str_to_bool,
+        nargs="?",
+        const=True,
+        default=True,
         help=(
-            "Directory used to save per-road, road-type, and overall CSV reports. "
-            "Defaults to ./occt_metrics_reports."
-        ),
-    )
-    parser.add_argument(
-        "--plot-dir",
-        type=Path,
-        default=None,
-        help="Directory used to save generated figures. Defaults to ./outputs/occt_vis.",
-    )
-    parser.add_argument(
-        "--plot-method",
-        type=str,
-        default=None,
-        help=(
-            "Method name used to draw single-road PDF time-series figures, "
-            "for example marl, pid, or mppi."
+            "Whether per-method figures use fill style for agent1-3. "
+            "Use true or false. Default is true."
         ),
     )
     parser.add_argument(
@@ -2291,118 +2634,73 @@ def parse_args() -> argparse.Namespace:
         default=[0],
         help="Road ids used in single-road PDF plots. Defaults to 0.",
     )
-    parser.add_argument(
-        "--plot-overall-bars",
-        action="store_true",
-        help="Draw TTC boxplot and hinge-related method-comparison charts.",
-    )
-    parser.add_argument(
-        "--plot-transition-comparison",
-        action="store_true",
-        help=(
-            "Draw method-comparison plots for a single road and a single agent: "
-            "hinge_dis and steering command with hinge-available background."
-        ),
-    )
-    parser.add_argument(
-        "--comparison-road-id",
-        type=int,
-        default=0,
-        help="Road id used for method-comparison plots. Default is 0.",
-    )
-    parser.add_argument(
-        "--comparison-agent-id",
-        type=int,
-        default=1,
-        help="Agent id used for method-comparison plots. Default is 1.",
-    )
-    parser.add_argument(
-        "--comparison-methods",
-        nargs="+",
-        default=None,
-        help=(
-            "Optional subset of methods used in method-comparison plots, "
-            "for example marl pid mppi."
-        ),
-    )
     return parser.parse_args()
 
 
 def main() -> None:
     args = parse_args()
-    input_paths = resolve_input_paths(args.paths)
-    report_dir = args.report_dir or _default_report_dir()
-    plot_dir = args.plot_dir or _default_plot_dir()
-    datasets_by_method = _collect_method_datasets(
-        input_paths,
-        forced_format=args.format,
-        followers=args.followers,
-        dt=args.dt,
-        labels=args.labels,
-    )
-    results_to_save = {}
+    data_dir = args.data_dir.resolve()
+    if not data_dir.exists():
+        raise FileNotFoundError(f"--data-dir not found: {data_dir}")
 
-    for method in _ordered_methods(list(datasets_by_method.keys())):
-        datasets = datasets_by_method[method]
+    method_config = _load_method_rollout_config(data_dir)
+    if args.compare_methods is not None:
+        selected_compare_methods = [
+            _resolve_method_name(method, method_config.keys())
+            for method in args.compare_methods
+        ]
+        comparison_csv_paths = generate_comparison_csvs(
+            data_dir=data_dir,
+            methods=selected_compare_methods,
+        )
+        for csv_path in comparison_csv_paths:
+            print(f"Saved comparison CSV: {csv_path}")
+        return
+
+    if args.method is None:
+        selected_methods = _ordered_methods(list(method_config.keys()))
+    else:
+        selected_methods = [_resolve_method_name(args.method, method_config.keys())]
+
+    for method in selected_methods:
+        source_path = _resolve_method_source_path(data_dir, method_config[method])
+        output_root = _resolve_method_output_root(source_path)
+        figure_dir = output_root / "figure"
+        table_dir = output_root / "table"
+
+        datasets = _load_single_method_datasets(
+            method=method,
+            source_path=source_path,
+            followers=args.followers,
+            dt=args.dt,
+        )
+
+        print(f"\nProcessing method: {_get_method_display_name(method)}")
+        print(f"Source path: {source_path}")
+        print(f"Figure dir: {figure_dir}")
+        print(f"Table dir: {table_dir}")
+
         report_groups = _build_method_reports(
             datasets,
             method=method,
             followers=args.followers,
             dt=args.dt,
         )
-        results_to_save[method] = report_groups
         for report_type, rows in report_groups.items():
             _print_report_group(method, report_type, rows)
-        csv_path = _write_method_csv(report_dir, method, report_groups)
+        csv_path = _write_method_csv(table_dir, method, report_groups)
         print(f"Saved CSV: {csv_path}")
-
-    if args.plot_method is not None:
-        plot_method = _resolve_method_name(args.plot_method, datasets_by_method.keys())
         saved_plot_paths = plot_representative_road_curves(
-            datasets_by_method[plot_method],
-            method=plot_method,
+            datasets,
+            method=method,
             followers=args.followers,
             dt=args.dt,
-            plot_dir=plot_dir,
+            plot_dir=figure_dir,
             road_ids=args.representative_roads,
+            plot_method_fill_stype=args.plot_method_fill_stype,
         )
         for plot_path in saved_plot_paths:
             print(f"Saved plot: {plot_path}")
-
-    if args.plot_overall_bars:
-        comparison_plot_paths = plot_overall_metric_bars(
-            datasets_by_method,
-            followers=args.followers,
-            dt=args.dt,
-            plot_dir=plot_dir,
-        )
-        for plot_path in comparison_plot_paths:
-            print(f"Saved plot: {plot_path}")
-
-    if args.plot_transition_comparison:
-        comparison_methods = (
-            [
-                _resolve_method_name(method, datasets_by_method.keys())
-                for method in args.comparison_methods
-            ]
-            if args.comparison_methods is not None
-            else None
-        )
-        comparison_paths = plot_method_transition_comparison(
-            datasets_by_method,
-            method_names=comparison_methods,
-            road_id=args.comparison_road_id,
-            agent_id=args.comparison_agent_id,
-            plot_dir=plot_dir,
-        )
-        for plot_path in comparison_paths:
-            print(f"Saved plot: {plot_path}")
-
-    if args.save_json is not None:
-        args.save_json.parent.mkdir(parents=True, exist_ok=True)
-        with args.save_json.open("w", encoding="utf-8") as fp:
-            json.dump(results_to_save, fp, ensure_ascii=False, indent=2)
-        print(f"\nSaved metrics JSON to {args.save_json}")
 
 
 if __name__ == "__main__":
