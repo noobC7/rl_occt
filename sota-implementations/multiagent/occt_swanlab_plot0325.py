@@ -489,12 +489,12 @@ def plot_step_length(
 
 
 if __name__ == "__main__":
-    save_dir = "./outputs/occt_vis/"
-    experiment_id = "jx4yxkwut28cb8i2cl62h"
+    save_dir = "./outputs/occt_vis/train_curves/"
+    experiment_id = "grs5kt4277mjwuohrpxea"
     os.makedirs(save_dir, exist_ok=True)
 
     swanlab_api = OpenApi()
     plot_episode_reward(swanlab_api, experiment_id, save_dir)
-    # plot_step_reward_components(swanlab_api, experiment_id, save_dir)
-    # plot_probability_curves(swanlab_api, experiment_id, save_dir)
-    # plot_step_length(swanlab_api, experiment_id, save_dir)
+    plot_step_reward_components(swanlab_api, experiment_id, save_dir)
+    plot_probability_curves(swanlab_api, experiment_id, save_dir)
+    plot_step_length(swanlab_api, experiment_id, save_dir)

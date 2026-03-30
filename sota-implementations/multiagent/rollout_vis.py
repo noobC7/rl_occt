@@ -29,6 +29,28 @@ def smooth_data(data, window_length=51, polyorder=3):
             
     # 对 axis=0 (时间轴) 进行平滑
     return savgol_filter(data, window_length=window_length, polyorder=polyorder, axis=0)
+
+
+def _tensor_to_numpy(tensor):
+    """将TensorDict中的张量统一转为numpy，自动去掉末尾的单维度。"""
+    if not isinstance(tensor, torch.Tensor):
+        return tensor
+    tensor = tensor.detach().cpu()
+    if tensor.ndim > 0 and tensor.shape[-1] == 1:
+        tensor = tensor.squeeze(-1)
+    return tensor.numpy()
+
+
+def _set_missing_alias(data, target_key, source_keys):
+    """为缺失字段补兼容别名，不覆盖已存在字段。"""
+    if target_key in data:
+        return
+    for source_key in source_keys:
+        if source_key in data:
+            data[target_key] = data[source_key]
+            return
+
+
 def extract_rollout_data(rollouts):
     """从rollout对象中提取所需数据"""
     # 获取基础数据
@@ -65,43 +87,56 @@ def extract_rollout_data(rollouts):
     data["action_log_probs"] = rollouts["agents"]["action_log_prob"].cpu().numpy()  # [batch, time, agent]
     
     info = rollouts["next"]["agents"]["info"]
-    data["act_steer"] = info["act_steer"].squeeze(-1).cpu().numpy()  # [batch, time, agent]
-    data["act_acc"] = info["act_acc"].squeeze(-1).cpu().numpy()  # [batch, time, agent]
-    data["pos"] = info["pos"].cpu().numpy()  # [batch, time, agent, 2]
-    data["error_space"] = info["error_space"].cpu().numpy()  # [batch, time, agent, 2]
-    data["error_vel"] = info["error_vel"].squeeze(-1).cpu().numpy()  # [batch, time, agent]
-    if "hinge_dis" in info.keys():
-        data["hinge_dis"] = info["hinge_dis"].squeeze(-1).cpu().numpy()  # [batch, time, agent]
-        data["hinge_status"] = info["hinge_status"].squeeze(-1).cpu().numpy()  # [batch, time, agent]
-        data["agent_hinge_status"] = info["agent_hinge_status"].squeeze(-1).cpu().numpy()  # [batch, time, agent]
-        data["reward_track_hinge"] = info["reward_track_hinge"].squeeze(-1).cpu().numpy()  # [batch, time, agent]
-        data["reward_track_hinge_vel"] = info["reward_track_hinge_vel"].squeeze(-1).cpu().numpy()  # [batch, time, agent]
-        data["reward_hinge"] = info["reward_hinge"].squeeze(-1).cpu().numpy()  # [batch, time, agent]
-        data["reward_approach_hinge"] = info["reward_approach_hinge"].squeeze(-1).cpu().numpy()  # [batch, time, agent]
-    data["vel_magnitude"] = info["vel_norm"].squeeze(-1).cpu().numpy()  # [batch, time, agent]
-    data["ref_vel"] = info["ref_vel"].squeeze(-1).cpu().numpy()  # [batch, time, agent]
-    data["rot"] = info["rot"].squeeze(-1).cpu().numpy()  # [batch, time, agent]
-    data["distance_ref"] = info["distance_ref"].squeeze(-1).cpu().numpy()  # [batch, time, agent]
-    data["distance_lookahead_pts"] = info["distance_lookahead_pts"].squeeze(-1).cpu().numpy()  # [batch, time, agent]
-    data["distance_left_b"] = info["distance_left_b"].squeeze(-1).cpu().numpy()  # [batch, time, agent]
-    data["distance_right_b"] = info["distance_right_b"].squeeze(-1).cpu().numpy()  # [batch, time, agent]
-    data["is_collision_with_agents"] = info["is_collision_with_agents"].squeeze(-1).cpu().numpy()  # [batch, time, agent]
-    data["is_collision_with_lanelets"] = info["is_collision_with_lanelets"].squeeze(-1).cpu().numpy()  # [batch, time, agent]
-    data["reward_total"] = info["reward_total"].squeeze(-1).cpu().numpy()  # [batch, time, agent]
-    data["reward_progress"] = info["reward_progress"].squeeze(-1).cpu().numpy()  # [batch, time, agent]
-    data["reward_vel"] = info["reward_vel"].squeeze(-1).cpu().numpy()  # [batch, time, agent]
-    data["reward_goal"] = info["reward_goal"].squeeze(-1).cpu().numpy()  # [batch, time, agent]
-    data["reward_track_ref_vel"] = info["reward_track_ref_vel"].squeeze(-1).cpu().numpy()  # [batch, time, agent]
-    data["reward_track_ref_space"] = info["reward_track_ref_space"].squeeze(-1).cpu().numpy()  # [batch, time, agent]
-    data["reward_track_ref_heading"] = info["reward_track_ref_heading"].squeeze(-1).cpu().numpy()  # [batch, time, agent]
-    data["reward_track_ref_path"] = info["reward_track_ref_path"].squeeze(-1).cpu().numpy()  # [batch, time, agent]
-    data["penalty_change_steering"] = info["penalty_change_steering"].squeeze(-1).cpu().numpy()  # [batch, time, agent]
-    data["penalty_change_acc"] = info["penalty_change_acc"].squeeze(-1).cpu().numpy()  # [batch, time, agent]
-    data["penalty_collide_with_agents"] = info["penalty_collide_with_agents"].squeeze(-1).cpu().numpy()  # [batch, time, agent]
-    data["penalty_outside_boundaries"] = info["penalty_outside_boundaries"].squeeze(-1).cpu().numpy()  # [batch, time, agent]
-    data["penalty_near_boundary"] = info["penalty_near_boundary"].squeeze(-1).cpu().numpy()  # [batch, time, agent]
-    data["penalty_near_other_agents"] = info["penalty_near_other_agents"].squeeze(-1).cpu().numpy()  # [batch, time, agent]
-    data["penalty_backward"] = info["penalty_backward"].squeeze(-1).cpu().numpy()  # [batch, time, agent]
+    base_field_map = {
+        "act_steer": "act_steer",
+        "act_acc": "act_acc",
+        "pos": "pos",
+        "error_space": "error_space",
+        "error_vel": "error_vel",
+        "vel_magnitude": "vel_norm",
+        "ref_vel": "ref_vel",
+        "rot": "rot",
+        "distance_ref": "distance_ref",
+        "distance_lookahead_pts": "distance_lookahead_pts",
+        "distance_left_b": "distance_left_b",
+        "distance_right_b": "distance_right_b",
+        "is_collision_with_agents": "is_collision_with_agents",
+        "is_collision_with_lanelets": "is_collision_with_lanelets",
+        "hinge_dis": "hinge_dis",
+        "hinge_status": "hinge_status",
+        "agent_hinge_status": "agent_hinge_status",
+        "hinged_followers_ratio": "hinged_followers_ratio",
+    }
+
+    info_keys = set(info.keys())
+    for data_key, info_key in base_field_map.items():
+        if info_key in info_keys:
+            data[data_key] = _tensor_to_numpy(info[info_key])
+
+    # occt_scenario.info() 会直接展开 self.reward_details，这里按前缀动态提取，
+    # 这样 reward_details 新增/改名后不需要再同步修改硬编码列表。
+    for info_key in info.keys():
+        if isinstance(info_key, str) and (
+            info_key.startswith("reward_") or info_key.startswith("penalty_")
+        ):
+            data[info_key] = _tensor_to_numpy(info[info_key])
+
+    # 兼容新旧 reward 字段名，保证新图表和历史 rollout 都能使用。
+    _set_missing_alias(data, "reward_track_ref_vel", ["reward_platoon_vel"])
+    _set_missing_alias(data, "reward_track_ref_space", ["reward_platoon_space"])
+    _set_missing_alias(data, "reward_track_ref_heading", ["reward_platoon_heading"])
+    _set_missing_alias(data, "reward_track_ref_path", ["reward_platoon_ref"])
+    _set_missing_alias(data, "reward_track_hinge", ["reward_hinge_space"])
+    _set_missing_alias(data, "reward_track_hinge_vel", ["reward_hinge_vel"])
+
+    _set_missing_alias(data, "reward_platoon_vel", ["reward_track_ref_vel"])
+    _set_missing_alias(data, "reward_platoon_space", ["reward_track_ref_space"])
+    _set_missing_alias(data, "reward_platoon_heading", ["reward_track_ref_heading"])
+    _set_missing_alias(data, "reward_platoon_ref", ["reward_track_ref_path"])
+    _set_missing_alias(data, "reward_hinge_space", ["reward_track_hinge"])
+    _set_missing_alias(data, "reward_hinge_vel", ["reward_track_hinge_vel"])
+    _set_missing_alias(data, "reward_hinge_ref", ["reward_track_hinge", "reward_hinge_space"])
+
     return data, batch_size, time_steps, num_agents
     
     
@@ -118,6 +153,7 @@ def plot_agent_data(data, batch_idx=0, agent_idx=0):
         acc_calc = np.concatenate([np.array([0.0]), acc_diff], axis=0)
     else:
         acc_calc = data["act_acc"][batch_idx, :valid_time_steps, agent_idx]
+
     plot_groups = [
         (
             "Speed / Ref Vel",
@@ -127,16 +163,22 @@ def plot_agent_data(data, batch_idx=0, agent_idx=0):
             ],
         ),
         (
-            "Vel Error / Acceleration",
+            "Vel Error",
             [
-                ("Vel Error", data["error_vel"][batch_idx, :valid_time_steps, agent_idx], color_list[5], "vel_error"),
-                ("Acceleration", acc_calc, color_list[1], "acceleration"),
+                ("Vel Error Front", data["error_vel"][batch_idx, :valid_time_steps, agent_idx, 0], color_list[5], "vel_error"),
+                ("Vel Error Rear", data["error_vel"][batch_idx, :valid_time_steps, agent_idx, 1], color_list[6], "vel_error"),
             ],
         ),
         (
-            "Heading / Steering [rad]",
+            "Heading",
             [
                 ("Heading", data["rot"][batch_idx, :valid_time_steps, agent_idx], color_list[2], "heading_angle"),
+            ],
+        ),
+        (
+            "Action",
+            [
+                ("Acceleration", acc_calc, color_list[1], "acceleration"),
                 ("Steering", data["act_steer"][batch_idx, :valid_time_steps, agent_idx], color_list[3], "steering_angle"),
             ],
         ),
@@ -175,58 +217,63 @@ def plot_agent_data(data, batch_idx=0, agent_idx=0):
             ],
         ),
         (
-            "Reward Goal / Ref Vel",
+            "Reward Goal / Platoon Vel",
             [
                 ("Reward Goal", data["reward_goal"][batch_idx, :valid_time_steps, agent_idx], color_list[3], "reward_goal"),
-                ("Reward Track Ref Vel", data["reward_track_ref_vel"][batch_idx, :valid_time_steps, agent_idx], color_list[4], "reward_track_ref_vel"),
+                ("Reward Platoon Vel", data["reward_platoon_vel"][batch_idx, :valid_time_steps, agent_idx], color_list[4], "reward_platoon_vel"),
             ],
         ),
         (
-            "Reward Ref Space / Heading",
+            "Reward Platoon Space / Heading",
             [
-                ("Reward Track Ref Space", data["reward_track_ref_space"][batch_idx, :valid_time_steps, agent_idx], color_list[5], "reward_track_ref_space"),
-                ("Reward Track Ref Heading", data["reward_track_ref_heading"][batch_idx, :valid_time_steps, agent_idx], color_list[8], "reward_track_ref_heading"),
+                ("Reward Platoon Space", data["reward_platoon_space"][batch_idx, :valid_time_steps, agent_idx], color_list[5], "reward_platoon_space"),
+                ("Reward Platoon Heading", data["reward_platoon_heading"][batch_idx, :valid_time_steps, agent_idx], color_list[8], "reward_platoon_heading"),
             ],
         ),
         (
-            "Reward Ref Path",
+            "Reward Platoon Ref",
             [
-                ("Reward Track Ref Path", data["reward_track_ref_path"][batch_idx, :valid_time_steps, agent_idx], color_list[9], "reward_track_ref_path"),
+                ("Reward Platoon Ref", data["reward_platoon_ref"][batch_idx, :valid_time_steps, agent_idx], color_list[9], "reward_platoon_ref"),
             ],
         ),
     ]
 
     if has_hinge:
+        hinge_status_traces = [
+            ("Hinge Dis", data["hinge_dis"][batch_idx, :valid_time_steps, agent_idx], color_list[0], "hinge_dis"),
+            ("Hinge Status", data["hinge_status"][batch_idx, :valid_time_steps, agent_idx], color_list[1], "hinge_status"),
+        ]
+        if "hinged_followers_ratio" in data:
+            hinge_status_traces.append(
+                ("Hinged Followers Ratio", data["hinged_followers_ratio"][batch_idx, :valid_time_steps, agent_idx], color_list[6], "hinged_followers_ratio")
+            )
         plot_groups.extend(
             [
                 (
-                    "Reward Hinge Capture",
+                    "Reward Hinge Space / Vel",
                     [
-                        ("Reward Track Hinge", data["reward_track_hinge"][batch_idx, :valid_time_steps, agent_idx], color_list[10], "reward_track_hinge"),
-                        ("Reward Track Hinge Vel", data["reward_track_hinge_vel"][batch_idx, :valid_time_steps, agent_idx], color_list[11], "reward_track_hinge_vel"),
+                        ("Reward Hinge Space", data["reward_hinge_space"][batch_idx, :valid_time_steps, agent_idx], color_list[10], "reward_hinge_space"),
+                        ("Reward Hinge Vel", data["reward_hinge_vel"][batch_idx, :valid_time_steps, agent_idx], color_list[11], "reward_hinge_vel"),
                     ],
                 ),
                 (
-                    "Reward Hinge / Approach",
+                    "Reward Hinge Ref / Approach",
                     [
-                        ("Reward Hinge", data["reward_hinge"][batch_idx, :valid_time_steps, agent_idx], color_list[12], "reward_hinge"),
+                        ("Reward Hinge Ref", data["reward_hinge_ref"][batch_idx, :valid_time_steps, agent_idx], color_list[12], "reward_hinge_ref"),
                         ("Reward Approach Hinge", data["reward_approach_hinge"][batch_idx, :valid_time_steps, agent_idx], color_list[13], "reward_approach_hinge"),
                     ],
                 ),
                 (
-                    "Hinge Distance / Status",
+                    "Reward Hinge / Status",
                     [
-                        ("Hinge Dis", data["hinge_dis"][batch_idx, :valid_time_steps, agent_idx], color_list[0], "hinge_dis"),
-                        ("Hinge Status", data["hinge_status"][batch_idx, :valid_time_steps, agent_idx], color_list[1], "hinge_status"),
-                    ],
-                ),
-                (
-                    "Hinge Approach / Diagnostics",
-                    [
-                        ("Reward Approach Hinge", data["reward_approach_hinge"][batch_idx, :valid_time_steps, agent_idx], color_list[13], "reward_approach_hinge_diag"),
+                        ("Reward Hinge", data["reward_hinge"][batch_idx, :valid_time_steps, agent_idx], color_list[15], "reward_hinge"),
                         ("Agent Hinge Status", data["agent_hinge_status"][batch_idx, :valid_time_steps, agent_idx], color_list[14], "agent_hinge_status"),
                     ],
                 ),
+                (
+                    "Hinge Distance / Status",
+                    hinge_status_traces,
+                )
             ]
         )
 
@@ -992,7 +1039,7 @@ if __name__ == "__main_chapter3_vis__":
     metrics_df = calculate_and_print_metrics(data, batch_idx=batch_idx,output_dir_abs=output_dir_abs,note=note)
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
-    rollout_file_path = "/home/yons/Graduation/rl_occt/outputs/2026-03-16/19-38-22/run-20260316_193825-qham7w6rbbz1huuyv01tt/rollouts/rollout_iter_499_frames_30000000.pt"
+    rollout_file_path = "/home/yons/Graduation/rl_occt/outputs/2026-03-30/11-44-51/run-20260330_114458-bise7bzvfzbw98lp0f8yg/rollouts/rollout_iter_0_frames_0_paths_0_5.pt"
     batch_idx = 1
     try:
         print(f"正在加载rollout文件: {rollout_file_path}")
