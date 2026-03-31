@@ -108,10 +108,10 @@ PLOT_METHOD_LINE_PALETTES = {
     "speed": ["#08306b", "#2c81c9", "#9ac9e3"],
     
     # Rocket 色系（深棕→红）
-    "acceleration": ["#251014", "#b5396b", "#f7a18d"],
+    "acceleration": ["#FD2D2D", "#f7af43", "#add929"],
     
     # Greys 专业灰度
-    "steering_angle": ["#1a1a1a", "#737373", "#d9d9d9"],
+    "steering_angle": ["#0dcd80", "#1FA0B6", "#1632bb"],
     
     # Turbid 清爽蓝绿
     "heading_angle": ["#2d5a70", "#41b399", "#9fd799"],

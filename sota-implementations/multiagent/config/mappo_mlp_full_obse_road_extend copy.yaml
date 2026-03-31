@@ -70,9 +70,6 @@ model:
         - self_speed
         - self_steering
         - self_acc
-        - self_ref_velocity
-        - self_ref_points
-        - self_hinge_preview_info
         - self_distance_to_ref
         - self_left_boundary_distance
         - self_right_boundary_distance
@@ -81,12 +78,11 @@ model:
         - self_platoon_error_vel
         - self_hinge_error_vel
         - self_platoon_error_space
-      hinge_key: self_hinge_past_info
+      hinge_key: self_hinge_info
       other_keys:
         - others_pos
         - others_rot
         - others_relative_longitudinal_velocity
-        - others_relative_acceleration
         - others_distance
   critic:
     depth: 2

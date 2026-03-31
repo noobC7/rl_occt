@@ -42,6 +42,7 @@ def analyze_hinge_transitions(
     rollout_path: Path,
     *,
     follower_ids: list[int],
+    response_offset: int,
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]], list[dict[str, Any]]]:
     rollouts = torch.load(rollout_path, map_location="cpu", weights_only=False)
     trajectories = list(rollouts.unbind(0))
@@ -80,8 +81,9 @@ def analyze_hinge_transitions(
             transition_steps = torch.nonzero(status_delta.abs() > 0.5, as_tuple=True)[0]
 
             for step_index in transition_steps.tolist():
-                steer_jump_abs = float(abs(steering_delta[step_index, agent_id].item()))
-                acc_jump_abs = float(abs(acc_delta[step_index, agent_id].item()))
+                response_step = min(step_index + response_offset, valid_len - 1)
+                steer_jump_abs = float(abs(steering_delta[response_step, agent_id].item()))
+                acc_jump_abs = float(abs(acc_delta[response_step, agent_id].item()))
                 transition_direction = "0_to_1" if status_delta[step_index].item() > 0 else "1_to_0"
 
                 event_rows.append(
@@ -90,6 +92,7 @@ def analyze_hinge_transitions(
                         "episode_index": episode_index,
                         "agent_id": agent_id,
                         "step_index": step_index,
+                        "response_step_index": response_step,
                         "transition_direction": transition_direction,
                         "hinge_status_prev": float(hinge_status[step_index - 1, agent_id].item())
                         if step_index > 0
@@ -161,6 +164,12 @@ def parse_args() -> argparse.Namespace:
         default=Path.cwd() / "hinge_transition_reports",
         help="Directory used to save CSV reports.",
     )
+    parser.add_argument(
+        "--response-offset",
+        type=int,
+        default=1,
+        help="Number of steps after the hinge_status flip used to measure action response.",
+    )
     return parser.parse_args()
 
 
@@ -169,6 +178,7 @@ def main() -> None:
     event_rows, per_road_rows, overall_rows = analyze_hinge_transitions(
         args.rollout_path,
         follower_ids=args.follower_ids,
+        response_offset=args.response_offset,
     )
 
     output_dir = args.output_dir

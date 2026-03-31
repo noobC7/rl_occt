@@ -55,7 +55,7 @@ env:
 model:
   shared_parameters: True
   centralised_critic: True
-  is_actor_retentive: False
+  is_actor_retentive: True
   is_critic_bi_head: False
   actor:
     depth: 2
@@ -131,6 +131,6 @@ logger:
   backend: swanlab
   project_name: "MAPPO_OCCT_TWO_STAGE"
   group_name: "mlp_road_extend_baseline"
-  description: "0330新基线，使用扩展道路，hineg的reward权重还有offset"
+  description: "0330新基线，使用扩展道路，hineg的reward权重还有offset，actor网络加了LSTM"
   resume_swanlab_id: None
   mode: cloud

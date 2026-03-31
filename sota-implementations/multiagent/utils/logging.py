@@ -105,7 +105,16 @@ def log_training(
                         f"train/info/{key}": value.mean().item()
                     }
                 )
-        hinge_status = info_td.get("hinge_status", None)
+        observation_td = sampling_td.get(("agents", "observation"), None)
+        hinge_status = (
+            observation_td.get("self_hinge_status", None)
+            if observation_td is not None and "self_hinge_status" in observation_td.keys()
+            else None
+        )
+        if hinge_status is None:
+            hinge_status = info_td.get("hinge_status", None)
+        elif hinge_status.ndim > 0 and hinge_status.shape[-1] == 1 and hinge_status.shape[-2] > 1:
+            hinge_status = hinge_status.select(-2, 0)
         if hinge_status is not None:
             hinge_mask = hinge_status.to(torch.bool)
             non_hinge_mask = ~hinge_mask

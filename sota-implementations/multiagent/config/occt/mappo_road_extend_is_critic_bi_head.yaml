@@ -56,7 +56,7 @@ model:
   shared_parameters: True
   centralised_critic: True
   is_actor_retentive: False
-  is_critic_bi_head: False
+  is_critic_bi_head: True
   actor:
     depth: 2
     num_cells: 344
@@ -64,30 +64,6 @@ model:
       include: null
       exclude:
         - self_hinge_status
-    retentive:
-      self_keys:
-        - self_vel
-        - self_speed
-        - self_steering
-        - self_acc
-        - self_ref_velocity
-        - self_ref_points
-        - self_hinge_preview_info
-        - self_distance_to_ref
-        - self_left_boundary_distance
-        - self_right_boundary_distance
-        - self_distance_to_left_boundary
-        - self_distance_to_right_boundary
-        - self_platoon_error_vel
-        - self_hinge_error_vel
-        - self_platoon_error_space
-      hinge_key: self_hinge_past_info
-      other_keys:
-        - others_pos
-        - others_rot
-        - others_relative_longitudinal_velocity
-        - others_relative_acceleration
-        - others_distance
   critic:
     depth: 2
     num_cells: 688
@@ -117,11 +93,9 @@ train:
   lr: 5e-5
   max_grad_norm: 40.0
   device: ???
-  resume_mode: fine_tune
-  #resume_from_checkpoint: /home/yons/Graduation/rl_occt/outputs/2026-03-29/12-27-15_mlp_full_obse_road_extend_train/checkpoints/checkpoint_iter_299_frames_18000000.pt
-  #resume_from_checkpoint: /home/yons/Graduation/rl_occt/outputs/2026-03-29/20-30-34_mlp_full_obse_road_extend_more_hinge_reward_offset_train/checkpoints/checkpoint_iter_299_frames_18000000.pt
-  resume_from_checkpoint: None
-  
+  resume_mode: null # fine_tume, resume or warm_start
+  resume_from_checkpoint: null # model pth file absolute path
+
 eval:
   evaluation_interval: 10
   evaluation_episodes: 6
@@ -130,7 +104,7 @@ eval:
 logger:
   backend: swanlab
   project_name: "MAPPO_OCCT_TWO_STAGE"
-  group_name: "mlp_road_extend_baseline"
-  description: "0330新基线，使用扩展道路，hineg的reward权重还有offset"
-  resume_swanlab_id: None
-  mode: cloud
+  group_name: "bi-head critic"
+  description: "critic网络变成根据hinge_status切换head"
+  resume_swanlab_id: null
+  mode: cloud # cloud or local

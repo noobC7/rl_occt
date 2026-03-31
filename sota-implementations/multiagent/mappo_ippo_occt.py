@@ -107,6 +107,16 @@ def _safe_observation_field_get(td, field_key: str):
     return value
 
 
+def _select_latest_phase_frame(
+    value: torch.Tensor | None, reference_ndim: int | None = None
+) -> torch.Tensor | None:
+    if value is None:
+        return None
+    if reference_ndim is not None and value.ndim > reference_ndim:
+        return value.select(-2, 0)
+    return value
+
+
 def infer_agent_advantage_exclude_dims(
     td_batch_size: torch.Size,
     advantage_shape: torch.Size,
@@ -160,6 +170,10 @@ def extract_training_phase_masks(
     elif hinge_status is None:
         hinge_status = _safe_info_get(td, hinge_key)
     agent_hinged = _safe_info_get(td, agent_hinged_key)
+    hinge_status = _select_latest_phase_frame(
+        hinge_status,
+        reference_ndim=None if agent_hinged is None else agent_hinged.ndim,
+    )
     if hinge_status is None or agent_hinged is None:
         raise KeyError(
             "Could not find self_hinge_status(or fallback hinge_status)/agent_hinge_status. "
@@ -167,6 +181,13 @@ def extract_training_phase_masks(
         )
     hinge_status = _ensure_phase_mask(hinge_status)
     agent_hinged = _ensure_phase_mask(agent_hinged)
+    if hinge_status.shape != agent_hinged.shape:
+        print(
+            "[PHASE_MASK_DEBUG] "
+            f"hinge_key={hinge_key}, "
+            f"hinge_status_shape={tuple(hinge_status.shape)}, "
+            f"agent_hinged_shape={tuple(agent_hinged.shape)}"
+        )
     hinge_approach_mask = hinge_status & ~agent_hinged
     platoon_mask = (~hinge_status) & ~agent_hinged
     return platoon_mask, hinge_approach_mask
@@ -729,6 +750,43 @@ def infer_named_observation_layout(
     }
 
 
+def _move_nested_tensordict_to_device(
+    td: TensorDictBase,
+    key,
+    device: torch.device | str,
+) -> None:
+    nested = _safe_get(td, key)
+    if isinstance(nested, TensorDictBase):
+        td.set(key, nested.to(device))
+
+
+def _log_named_observation_devices(
+    td: TensorDictBase,
+    key,
+    *,
+    label: str,
+) -> None:
+    nested = _safe_get(td, key)
+    if not isinstance(nested, TensorDictBase):
+        print(f"[OBS_DEVICE][{label}] key={key} missing or not a TensorDict.")
+        return
+    parts = []
+    for obs_key in nested.keys():
+        value = nested.get(obs_key)
+        if isinstance(value, torch.Tensor):
+            parts.append(f"{obs_key}:device={value.device},shape={tuple(value.shape)}")
+    print(f"[OBS_DEVICE][{label}] " + " | ".join(parts))
+
+
+def _log_module_parameter_device(module: nn.Module, label: str) -> None:
+    try:
+        first_param = next(module.parameters())
+    except StopIteration:
+        print(f"[MODULE_DEVICE][{label}] no parameters")
+        return
+    print(f"[MODULE_DEVICE][{label}] device={first_param.device}")
+
+
 class NamedObservationProjector(nn.Module):
     def __init__(
         self,
@@ -1012,7 +1070,9 @@ class NamedRetentiveActorAgent(nn.Module):
         self.other_history_keys = other_history_keys
         self.latest_history_index = latest_history_index
 
-        batch_dims = 0
+        # sample_agent_obs values keep the environment batch dimension after
+        # selecting one representative agent, so history starts after 1 batch dim.
+        batch_dims = 1
         self_current_dim = 0
         for key in self_current_keys:
             current_value = _select_latest_named_leaf(
@@ -1036,8 +1096,11 @@ class NamedRetentiveActorAgent(nn.Module):
 
         if hinge_history_key is not None:
             hinge_value = sample_agent_obs[hinge_history_key]
-            if hinge_value.ndim > batch_dims + 2:
-                hinge_value = hinge_value.select(batch_dims + 1, 0)
+            if hinge_value.ndim != batch_dims + 2:
+                raise RuntimeError(
+                    f"Retentive hinge key '{hinge_history_key}' is expected to have shape "
+                    f"(*, history_len, feat_dim), but got {tuple(hinge_value.shape)}."
+                )
             hinge_step_dim = int(
                 _flatten_named_leaf_preserve_time(
                     hinge_value, batch_dims=batch_dims
@@ -1100,6 +1163,19 @@ class NamedRetentiveActorAgent(nn.Module):
             activation_class=activation_class,
         )
 
+    def _assert_same_device(
+        self, tensor: torch.Tensor, module: nn.Module, label: str
+    ) -> None:
+        try:
+            param_device = next(module.parameters()).device
+        except StopIteration:
+            return
+        if tensor.device != param_device:
+            raise RuntimeError(
+                f"[DEVICE_MISMATCH][{label}] input_device={tensor.device} "
+                f"module_device={param_device} shape={tuple(tensor.shape)}"
+            )
+
     def _self_feature(self, obs: dict[str, torch.Tensor], batch_dims: int) -> torch.Tensor:
         features = []
         for key in self.self_current_keys:
@@ -1110,7 +1186,9 @@ class NamedRetentiveActorAgent(nn.Module):
                 use_history_observation=True,
             )
             features.append(_flatten_named_leaf(current_value, batch_dims=batch_dims))
-        return self.self_encoder(torch.cat(features, dim=-1))
+        self_feature = torch.cat(features, dim=-1)
+        self._assert_same_device(self_feature, self.self_encoder, "self_encoder")
+        return self.self_encoder(self_feature)
 
     def _hinge_feature(
         self, obs: dict[str, torch.Tensor], batch_dims: int
@@ -1118,8 +1196,11 @@ class NamedRetentiveActorAgent(nn.Module):
         if self.hinge_history_key is None or self.hinge_step_encoder is None:
             return None
         hinge_value = obs[self.hinge_history_key]
-        if hinge_value.ndim > batch_dims + 2:
-            hinge_value = hinge_value.select(batch_dims + 1, 0)
+        if hinge_value.ndim != batch_dims + 2:
+            raise RuntimeError(
+                f"Retentive hinge key '{self.hinge_history_key}' is expected to have shape "
+                f"(*, history_len, feat_dim), but got {tuple(hinge_value.shape)}."
+            )
         hinge_value = maybe_reverse_history_sequence(
             hinge_value,
             latest_index=self.latest_history_index,
@@ -1128,7 +1209,11 @@ class NamedRetentiveActorAgent(nn.Module):
         hinge_steps = _flatten_named_leaf_preserve_time(
             hinge_value, batch_dims=batch_dims
         )
+        self._assert_same_device(
+            hinge_steps, self.hinge_step_encoder, "hinge_step_encoder"
+        )
         hinge_encoded = self.hinge_step_encoder(hinge_steps)
+        self._assert_same_device(hinge_encoded, self.hinge_lstm, "hinge_lstm")
         _, (hidden_state, _) = self.hinge_lstm(hinge_encoded)
         return hidden_state[-1]
 
@@ -1150,12 +1235,19 @@ class NamedRetentiveActorAgent(nn.Module):
                 other_value = other_value.flatten(batch_dims + 2, -1)
             other_parts.append(other_value)
         other_value = torch.cat(other_parts, dim=-1)
+        self._assert_same_device(
+            other_value, self.other_entity_encoder, "other_entity_encoder"
+        )
         encoded_entities = self.other_entity_encoder(other_value)
         flattened_entities = encoded_entities.reshape(
             *encoded_entities.shape[: batch_dims + 1],
             self.n_other_agents * encoded_entities.shape[-1],
         )
+        self._assert_same_device(
+            flattened_entities, self.other_step_projector, "other_step_projector"
+        )
         other_step_features = self.other_step_projector(flattened_entities)
+        self._assert_same_device(other_step_features, self.other_lstm, "other_lstm")
         _, (hidden_state, _) = self.other_lstm(other_step_features)
         return hidden_state[-1]
 
@@ -1313,7 +1405,7 @@ def run_eval_export_chunk(
     if torch.cuda.is_available():
         torch.cuda.empty_cache()
 
-@hydra.main(version_base="1.1", config_path="config", config_name="mappo_mlp_continues_act_change_penalty")
+@hydra.main(version_base="1.1", config_path="config/occt", config_name="mappo_road_extend_baseline")
 def train(cfg: DictConfig):
     # Device
     cfg.train.device = "cpu" if not torch.cuda.device_count() else "cuda:0"
@@ -1359,7 +1451,7 @@ def train(cfg: DictConfig):
     critic_cfg = cfg.model.critic
     actor_fields_cfg = actor_cfg.fields
     critic_fields_cfg = critic_cfg.fields
-    actor_retentive_cfg = actor_cfg.retentive
+    actor_retentive_cfg = actor_cfg.get("retentive", {})
     # Policy
     actor_depth = int(actor_cfg.depth)
     actor_num_cells = actor_cfg.num_cells
@@ -1414,15 +1506,19 @@ def train(cfg: DictConfig):
             "model.use_phase_conditioned_network now affects only the critic path. "
             "The actor always uses either the standard single-head MLP or the retentive actor."
         )
-    phase_obs_group = (
-        resolve_model_phase_key(
-            str(critic_cfg.phase_obs_key),
+    phase_obs_group = None
+    if use_phase_conditioned_network or is_critic_bi_head:
+        phase_obs_key = critic_cfg.get("phase_obs_key", None)
+        if phase_obs_key is None:
+            raise ValueError(
+                "critic.phase_obs_key must be set when "
+                "use_phase_conditioned_network=True or is_critic_bi_head=True."
+            )
+        phase_obs_group = resolve_model_phase_key(
+            str(phase_obs_key),
             available_obs_keys,
             "critic.phase_obs_key",
         )
-        if (use_phase_conditioned_network or is_critic_bi_head)
-        else None
-    )
 
     if is_actor_retentive:
         retentive_self_keys = resolve_model_obs_keys(
@@ -1434,6 +1530,9 @@ def train(cfg: DictConfig):
                     "self_speed",
                     "self_steering",
                     "self_acc",
+                    "self_ref_velocity",
+                    "self_ref_points",
+                    "self_hinge_preview_info",
                     "self_distance_to_ref",
                     "self_left_boundary_distance",
                     "self_right_boundary_distance",
@@ -1462,7 +1561,7 @@ def train(cfg: DictConfig):
             label="actor.retentive.other_keys",
         )
         hinge_history_key = _normalize_optional_cfg_value(
-            actor_retentive_cfg.get("hinge_key", "self_hinge_info")
+            actor_retentive_cfg.get("hinge_key", "self_hinge_past_info")
         )
         if hinge_history_key is not None:
             hinge_history_key = resolve_model_phase_key(
@@ -1520,6 +1619,8 @@ def train(cfg: DictConfig):
         },
         return_log_prob=True,
     )
+    policy = policy.to(cfg.train.device)
+    _log_module_parameter_device(policy, "policy")
 
     # Critic
     if is_critic_bi_head:
@@ -1582,6 +1683,8 @@ def train(cfg: DictConfig):
             module=module,
             in_keys=[("agents", "observation")],
         )
+    value_module = value_module.to(cfg.train.device)
+    _log_module_parameter_device(value_module, "value_module")
     phase_weight_controller = MetricAdaptiveWeightController(cfg, cfg.train.device)
     if cfg.collector.n_iters > 0:
         collector = SyncDataCollector(
@@ -1621,7 +1724,7 @@ def train(cfg: DictConfig):
     )
     optim = torch.optim.Adam(loss_module.parameters(), cfg.train.lr)
 
-    if os.path.exists(resume_from_checkpoint):
+    if resume_from_checkpoint and os.path.exists(resume_from_checkpoint):
         use_flexible_checkpoint_loading = (
             resume_mode in {"warm_start", "fine_tune"}
             and (is_actor_retentive or is_critic_bi_head)
@@ -1777,8 +1880,19 @@ def train(cfg: DictConfig):
         for epoch_idx in range(cfg.train.num_epochs):
             for _ in range(cfg.collector.frames_per_batch // cfg.train.minibatch_size):
                 pbar.set_postfix({"Epoch": f"{epoch_idx+1}/{cfg.train.num_epochs}"})
-                subdata = replay_buffer.sample()
+                subdata = replay_buffer.sample().to(cfg.train.device)
+                _move_nested_tensordict_to_device(
+                    subdata, ("agents", "observation"), cfg.train.device
+                )
+                _move_nested_tensordict_to_device(
+                    subdata, ("next", "agents", "observation"), cfg.train.device
+                )
                 if not minibatch_layout_logged:
+                    _log_named_observation_devices(
+                        subdata,
+                        ("agents", "observation"),
+                        label="minibatch_agents_observation",
+                    )
                     log_advantage_layout("minibatch", subdata, loss_module, env.n_agents)
                     minibatch_layout_logged = True
                 loss_vals = loss_module(subdata)

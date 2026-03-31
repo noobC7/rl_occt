@@ -92,7 +92,8 @@ def extract_rollout_data(rollouts):
         "act_acc": "act_acc",
         "pos": "pos",
         "error_space": "error_space",
-        "error_vel": "error_vel",
+        "platoon_error_vel": "platoon_error_vel",
+        "hinge_error_vel": "hinge_error_vel",
         "vel_magnitude": "vel_norm",
         "ref_vel": "ref_vel",
         "rot": "rot",
@@ -136,6 +137,25 @@ def extract_rollout_data(rollouts):
     _set_missing_alias(data, "reward_hinge_space", ["reward_track_hinge"])
     _set_missing_alias(data, "reward_hinge_vel", ["reward_track_hinge_vel"])
     _set_missing_alias(data, "reward_hinge_ref", ["reward_track_hinge", "reward_hinge_space"])
+
+    # 兼容旧版 rollout_vis 逻辑：过去直接读 error_vel / error_space。
+    if "error_vel" not in data:
+        if (
+            "platoon_error_vel" in data
+            and "hinge_error_vel" in data
+            and "hinge_status" in data
+        ):
+            hinge_mask = np.asarray(data["hinge_status"]).astype(bool)[..., None]
+            data["error_vel"] = np.where(
+                hinge_mask,
+                np.asarray(data["hinge_error_vel"]),
+                np.asarray(data["platoon_error_vel"]),
+            )
+        elif "platoon_error_vel" in data:
+            data["error_vel"] = data["platoon_error_vel"]
+        elif "hinge_error_vel" in data:
+            data["error_vel"] = data["hinge_error_vel"]
+    _set_missing_alias(data, "error_space", ["platoon_error_space"])
 
     return data, batch_size, time_steps, num_agents
     
@@ -1039,7 +1059,7 @@ if __name__ == "__main_chapter3_vis__":
     metrics_df = calculate_and_print_metrics(data, batch_idx=batch_idx,output_dir_abs=output_dir_abs,note=note)
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
-    rollout_file_path = "/home/yons/Graduation/rl_occt/outputs/2026-03-30/11-44-51/run-20260330_114458-bise7bzvfzbw98lp0f8yg/rollouts/rollout_iter_0_frames_0_paths_0_5.pt"
+    rollout_file_path = "/home/yons/Graduation/rl_occt/outputs/2026-03-31/14-44-03/run-20260331_144422-ziwup9uwq8g3f249hceym/rollouts/rollout_iter_40_frames_2520000.pt"
     batch_idx = 1
     try:
         print(f"正在加载rollout文件: {rollout_file_path}")
@@ -1063,7 +1083,7 @@ if __name__ == "__main__":
             summary_html_name = os.path.basename(summary_link_entry)
             
             # 启动本地HTTP服务器（--directory 指定根目录为输出目录）
-            port = 8000
+            port = 7801
             # 终止占用端口的进程（Windows用taskkill，Linux/Mac用fuser）
             if os.name == "nt":  # Windows系统
                 subprocess.run(
