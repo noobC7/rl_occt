@@ -103,7 +103,7 @@ eval:
 
 logger:
   backend: swanlab
-  project_name: "MAPPO_OCCT_TWO_STAGE"
+  project_name: "MAPPO_OCCT_EXTEND"
   group_name: "bi-head critic"
   description: "critic网络变成根据hinge_status切换head"
   resume_swanlab_id: null
