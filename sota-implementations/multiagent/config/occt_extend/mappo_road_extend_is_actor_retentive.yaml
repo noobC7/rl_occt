@@ -116,7 +116,7 @@ train:
   lr: 5e-5
   max_grad_norm: 40.0
   device: ???
-  resume_mode: null # fine_tume, resume or warm_start
+  resume_mode: null # fine_tune, resume or warm_start
   resume_from_checkpoint: null # model pth file absolute path
   
 eval:
