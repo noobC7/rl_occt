@@ -93,22 +93,111 @@ def save_rollout(logger, rollouts, iteration, total_frames, suffix=""):
     
     return rollout_path
 
-def load_checkpoint(checkpoint_path, policy=None, value_module=None, optim=None):
-    """加载训练检查点并恢复训练状态"""
+
+def _load_module_checkpoint(
+    module,
+    state_dict,
+    *,
+    label: str,
+    flexible: bool,
+):
+    if not flexible:
+        module.load_state_dict(state_dict)
+        return
+
+    module_state = module.state_dict()
+    compatible_state = {}
+    skipped_unexpected = []
+    skipped_shape = []
+
+    for key, value in state_dict.items():
+        if key not in module_state:
+            skipped_unexpected.append(key)
+            continue
+        if module_state[key].shape != value.shape:
+            skipped_shape.append(
+                (key, tuple(value.shape), tuple(module_state[key].shape))
+            )
+            continue
+        compatible_state[key] = value
+
+    load_result = module.load_state_dict(compatible_state, strict=False)
+    if skipped_unexpected or skipped_shape or load_result.missing_keys:
+        warning_lines = [
+            f"Loaded {len(compatible_state)}/{len(module_state)} compatible tensors into {label}."
+        ]
+        if skipped_unexpected:
+            warning_lines.append(
+                f"Skipped {len(skipped_unexpected)} unexpected tensors in checkpoint for {label}."
+            )
+        if skipped_shape:
+            warning_lines.append(
+                f"Skipped {len(skipped_shape)} shape-mismatched tensors in {label}."
+            )
+        if load_result.missing_keys:
+            warning_lines.append(
+                f"{label} still has {len(load_result.missing_keys)} missing tensors after partial load."
+            )
+        torchrl_logger.warning(" ".join(warning_lines))
+
+
+def load_checkpoint(
+    checkpoint_path,
+    policy=None,
+    value_module=None,
+    optim=None,
+    *,
+    flexible: bool = False,
+    resume_mode: str = "resume",
+):
+    """加载训练检查点并恢复训练状态
+    resume：完整续训。加载 policy、value_module、optimizer，并且继续使用 checkpoint 里的 iteration 和 total_frames。也就是“从上次断点接着跑”。
+    warm_start：权重热启动。加载 policy 和 value_module，但不加载 optimizer，同时把返回的 iteration 和 total_frames 重置为 0。也就是“拿旧模型参数当初始化，但按一次新训练开始”。
+    fine_tune：当前仓库里的定义是“只加载 policy，不加载 value_module，也不加载 optimizer”，并把 iteration 和 total_frames 重置为 0。也就是“只迁移 actor，critic 重新学”。
+    """
+    if resume_mode not in {"resume", "warm_start", "fine_tune"}:
+        raise ValueError(f"Unsupported resume_mode: {resume_mode}")
+
     checkpoint = torch.load(checkpoint_path)
-    if policy is not None:
-        policy.load_state_dict(checkpoint['policy_state_dict'])
-    if value_module is not None:
-        value_module.load_state_dict(checkpoint['value_module_state_dict'])
-    if optim is not None:
-        optim.load_state_dict(checkpoint['optimizer_state_dict'])
-    else:
-        torchrl_logger.warning("Optimizer state dict not found in checkpoint.")
-    
-    iteration = checkpoint['iteration']
-    total_frames = checkpoint['total_frames']
-    
-    torchrl_logger.info(f"Checkpoint loaded from {checkpoint_path}")
-    torchrl_logger.info(f"Resuming training from iteration {iteration}, frame {total_frames}")
-    
+    target_value_module = value_module if resume_mode != "fine_tune" else None
+    target_optim = optim if resume_mode == "resume" else None
+
+    if policy is not None and "policy_state_dict" in checkpoint:
+        _load_module_checkpoint(
+            policy,
+            checkpoint["policy_state_dict"],
+            label="policy",
+            flexible=flexible,
+        )
+    if target_value_module is not None and "value_module_state_dict" in checkpoint:
+        _load_module_checkpoint(
+            target_value_module,
+            checkpoint["value_module_state_dict"],
+            label="value_module",
+            flexible=flexible,
+        )
+    if target_optim is not None and "optimizer_state_dict" in checkpoint:
+        if flexible:
+            try:
+                target_optim.load_state_dict(checkpoint["optimizer_state_dict"])
+            except ValueError:
+                torchrl_logger.warning(
+                    "Skipped optimizer state restore because the optimizer structure changed."
+                )
+        else:
+            target_optim.load_state_dict(checkpoint["optimizer_state_dict"])
+
+    iteration = checkpoint.get("iteration", 0)
+    total_frames = checkpoint.get("total_frames", 0)
+    if resume_mode != "resume":
+        iteration, total_frames = 0, 0
+
+    action = "partially loaded" if flexible else "loaded"
+    torchrl_logger.info(
+        f"Checkpoint {action} from {checkpoint_path} with resume_mode={resume_mode}"
+    )
+    torchrl_logger.info(
+        f"Resuming training from iteration {iteration}, frame {total_frames}"
+    )
+
     return iteration, total_frames

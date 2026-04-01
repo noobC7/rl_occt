@@ -579,66 +579,6 @@ def maybe_reverse_history_sequence(
     return obs
 
 
-def _module_load_flex(module: nn.Module, state_dict: dict[str, torch.Tensor], label: str) -> None:
-    module_state = module.state_dict()
-    compatible_state = {}
-    skipped_missing = []
-    skipped_shape = []
-    for key, value in state_dict.items():
-        if key not in module_state:
-            skipped_missing.append(key)
-            continue
-        if module_state[key].shape != value.shape:
-            skipped_shape.append(
-                (key, tuple(value.shape), tuple(module_state[key].shape))
-            )
-            continue
-        compatible_state[key] = value
-    load_result = module.load_state_dict(compatible_state, strict=False)
-    if skipped_missing or skipped_shape or load_result.missing_keys:
-        warning_lines = [
-            f"Loaded {len(compatible_state)}/{len(module_state)} compatible tensors into {label}."
-        ]
-        if skipped_missing:
-            warning_lines.append(
-                f"Skipped {len(skipped_missing)} unexpected tensors in checkpoint for {label}."
-            )
-        if skipped_shape:
-            warning_lines.append(
-                f"Skipped {len(skipped_shape)} shape-mismatched tensors in {label}."
-            )
-        if load_result.missing_keys:
-            warning_lines.append(
-                f"{label} still has {len(load_result.missing_keys)} missing tensors after partial load."
-            )
-        torchrl_logger.warning(" ".join(warning_lines))
-
-
-def load_checkpoint_flex(
-    checkpoint_path: str,
-    *,
-    policy: nn.Module | None = None,
-    value_module: nn.Module | None = None,
-    optim: torch.optim.Optimizer | None = None,
-) -> tuple[int, int]:
-    checkpoint = torch.load(checkpoint_path)
-    if policy is not None and "policy_state_dict" in checkpoint:
-        _module_load_flex(policy, checkpoint["policy_state_dict"], "policy")
-    if value_module is not None and "value_module_state_dict" in checkpoint:
-        _module_load_flex(value_module, checkpoint["value_module_state_dict"], "value_module")
-    if optim is not None and "optimizer_state_dict" in checkpoint:
-        try:
-            optim.load_state_dict(checkpoint["optimizer_state_dict"])
-        except ValueError:
-            torchrl_logger.warning(
-                "Skipped optimizer state restore because the optimizer structure changed."
-            )
-    iteration = checkpoint.get("iteration", 0)
-    total_frames = checkpoint.get("total_frames", 0)
-    torchrl_logger.info(f"Checkpoint partially loaded from {checkpoint_path}")
-    return iteration, total_frames
-
-
 def _resolve_history_index(size: int, latest_index: int) -> int:
     resolved_index = latest_index if latest_index >= 0 else size + latest_index
     if not 0 <= resolved_index < size:
@@ -1063,6 +1003,8 @@ class NamedRetentiveActorAgent(nn.Module):
         latest_history_index: int = 0,
         out_features: int,
         activation_class: type[nn.Module] = nn.Tanh,
+        branch_hidden: int | None = None,  # 新增：可配置branch hidden size
+        lstm_hidden: int | None = None,    # 新增：可配置LSTM hidden size
     ) -> None:
         super().__init__()
         self.self_current_keys = self_current_keys
@@ -1086,11 +1028,13 @@ class NamedRetentiveActorAgent(nn.Module):
             )
 
         base_hidden = hidden_sizes[-1] if hidden_sizes else max(out_features, 64)
-        branch_hidden = max(32, base_hidden // 2)
+        # 如果yaml中配置了branch_hidden，使用配置值；否则使用默认值
+        self.branch_hidden = branch_hidden if branch_hidden is not None else max(32, base_hidden // 2)
+        self.lstm_hidden = lstm_hidden if lstm_hidden is not None else self.branch_hidden
         self.self_encoder = build_mlp(
             max(self_current_dim, 1),
-            branch_hidden,
-            [branch_hidden],
+            self.branch_hidden,
+            [self.branch_hidden],
             activation_class=activation_class,
         )
 
@@ -1108,16 +1052,16 @@ class NamedRetentiveActorAgent(nn.Module):
             )
             self.hinge_step_encoder = build_mlp(
                 hinge_step_dim,
-                branch_hidden,
-                [branch_hidden],
+                self.branch_hidden,
+                [self.branch_hidden],
                 activation_class=activation_class,
             )
             self.hinge_lstm = nn.LSTM(
-                input_size=branch_hidden,
-                hidden_size=branch_hidden,
+                input_size=self.branch_hidden,
+                hidden_size=self.lstm_hidden,
                 batch_first=True,
             )
-            self.hinge_feature_dim = branch_hidden
+            self.hinge_feature_dim = self.lstm_hidden
         else:
             self.hinge_step_encoder = None
             self.hinge_lstm = None
@@ -1132,22 +1076,22 @@ class NamedRetentiveActorAgent(nn.Module):
                 other_entity_dim += int(other_value.flatten(batch_dims + 2, -1).shape[-1])
             self.other_entity_encoder = build_mlp(
                 other_entity_dim,
-                branch_hidden,
-                [branch_hidden],
+                self.branch_hidden,
+                [self.branch_hidden],
                 activation_class=activation_class,
             )
             self.other_step_projector = build_mlp(
-                self.n_other_agents * branch_hidden,
-                branch_hidden,
-                [branch_hidden],
+                self.n_other_agents * self.branch_hidden,
+                self.branch_hidden,
+                [self.branch_hidden],
                 activation_class=activation_class,
             )
             self.other_lstm = nn.LSTM(
-                input_size=branch_hidden,
-                hidden_size=branch_hidden,
+                input_size=self.branch_hidden,
+                hidden_size=self.lstm_hidden,
                 batch_first=True,
             )
-            self.other_feature_dim = branch_hidden
+            self.other_feature_dim = self.lstm_hidden
         else:
             self.n_other_agents = 0
             self.other_entity_encoder = None
@@ -1277,6 +1221,8 @@ class NamedRetentiveActorBackbone(nn.Module):
         num_cells: int | list[int] | tuple[int, ...],
         activation_class: type[nn.Module] = nn.Tanh,
         latest_history_index: int = 0,
+        branch_hidden: int | None = None,  # 新增：可配置branch hidden size
+        lstm_hidden: int | None = None,    # 新增：可配置LSTM hidden size
     ) -> None:
         super().__init__()
         self.n_agents = n_agents
@@ -1305,6 +1251,8 @@ class NamedRetentiveActorBackbone(nn.Module):
                     latest_history_index=latest_history_index,
                     out_features=n_agent_outputs,
                     activation_class=activation_class,
+                    branch_hidden=branch_hidden,  # 新增：传递参数
+                    lstm_hidden=lstm_hidden,      # 新增：传递参数
                 )
                 for _ in range(network_count)
             ]
@@ -1405,7 +1353,7 @@ def run_eval_export_chunk(
     if torch.cuda.is_available():
         torch.cuda.empty_cache()
 
-@hydra.main(version_base="1.1", config_path="config/occt", config_name="mappo_road_extend_baseline")
+@hydra.main(version_base="1.1", config_path="config/occt_extend", config_name="mappo_road_extend_baseline")
 def train(cfg: DictConfig):
     # Device
     cfg.train.device = "cpu" if not torch.cuda.device_count() else "cuda:0"
@@ -1569,6 +1517,11 @@ def train(cfg: DictConfig):
                 available_obs_keys,
                 "actor.retentive.hinge_key",
             )
+        # 从yaml配置读取branch_hidden和lstm_hidden参数
+        retentive_cfg = actor_cfg.get("retentive", {})
+        actor_branch_hidden = retentive_cfg.get("branch_hidden", None)
+        actor_lstm_hidden = retentive_cfg.get("lstm_hidden", None)
+
         actor_backbone = NamedRetentiveActorBackbone(
             sample_obs=sample_obs,
             self_current_keys=retentive_self_keys,
@@ -1581,6 +1534,8 @@ def train(cfg: DictConfig):
             num_cells=actor_num_cells,
             activation_class=nn.Tanh,
             latest_history_index=history_latest_index,
+            branch_hidden=actor_branch_hidden,  # 新增：从yaml读取
+            lstm_hidden=actor_lstm_hidden,      # 新增：从yaml读取
         )
     else:
         actor_backbone = nn.Sequential(
@@ -1725,42 +1680,14 @@ def train(cfg: DictConfig):
     optim = torch.optim.Adam(loss_module.parameters(), cfg.train.lr)
 
     if resume_from_checkpoint and os.path.exists(resume_from_checkpoint):
-        use_flexible_checkpoint_loading = (
-            resume_mode in {"warm_start", "fine_tune"}
-            and (is_actor_retentive or is_critic_bi_head)
+        start_iteration, start_frames = load_checkpoint(
+            resume_from_checkpoint,
+            policy=policy,
+            value_module=value_module,
+            optim=optim,
+            flexible=False,
+            resume_mode=resume_mode,
         )
-        if resume_mode == "resume":
-            start_iteration, start_frames = load_checkpoint(
-                resume_from_checkpoint, policy, value_module, optim
-            )
-        elif resume_mode == "warm_start":
-            if use_flexible_checkpoint_loading:
-                _ = load_checkpoint_flex(
-                    resume_from_checkpoint,
-                    policy=policy,
-                    value_module=value_module,
-                    optim=None,
-                )
-            else:
-                _ = load_checkpoint(
-                    resume_from_checkpoint, policy, value_module, optim=None
-                )
-            start_iteration, start_frames = 0, 0
-        elif resume_mode == "fine_tune":
-            if use_flexible_checkpoint_loading:
-                _ = load_checkpoint_flex(
-                    resume_from_checkpoint,
-                    policy=policy,
-                    value_module=None,
-                    optim=None,
-                )
-            else:
-                _ = load_checkpoint(
-                    resume_from_checkpoint, policy, value_module=None, optim=None
-                )
-            start_iteration, start_frames = 0, 0
-        else:
-            raise TypeError
         torchrl_logger.info(
             f"Resumed training from checkpoint {resume_from_checkpoint} "
             f"at iteration {start_iteration} and frame {start_frames}."

@@ -32,7 +32,7 @@ def _masked_mean(value: torch.Tensor, mask: torch.Tensor) -> float:
 def init_logging(cfg, model_name: str):
     experiment_name=generate_exp_name(model_name, cfg.logger.group_name)
     print(f"experiment_name: {experiment_name}")
-    resume = False if cfg.logger.resume_swanlab_id=="None" else True
+    resume = True if cfg.logger.resume_swanlab_id else False
     logger = get_logger(
         logger_type=cfg.logger.backend,
         logger_name=os.getcwd(),
@@ -48,7 +48,7 @@ def init_logging(cfg, model_name: str):
             "project": cfg.logger.project_name
             or f"swanlab_{cfg.env.scenario_name}",
             "mode": cfg.logger.mode,
-            "id": cfg.logger.resume_swanlab_id if resume else None,
+            "id": cfg.logger.resume_swanlab_id,
             "resume": resume,
             "description":cfg.logger.description,
         },
