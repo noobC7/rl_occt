@@ -15,6 +15,62 @@ from torchrl.record.loggers.wandb import WandbLogger
 from torchrl.record.loggers.swanlab import SwanLabLogger
 
 
+def _to_scalar(value) -> float:
+    if isinstance(value, torch.Tensor):
+        if value.numel() == 0:
+            return 0.0
+        if value.numel() == 1:
+            return float(value.item())
+        return float(value.float().mean().item())
+    if isinstance(value, np.ndarray):
+        if value.size == 0:
+            return 0.0
+        return float(value.mean())
+    return float(value)
+
+
+def _group_metric_name(group: str, metric_name: str) -> str:
+    group = group.strip("/") or "default"
+    metric_name = metric_name.strip("/").replace("/", "_")
+    if not metric_name:
+        raise ValueError("Metric name must not be empty after normalization.")
+    return f"{group}/{metric_name}"
+
+
+def _add_metric(
+    metrics_to_log: dict[str, float],
+    group: str,
+    metric_name: str,
+    value,
+) -> None:
+    metrics_to_log[_group_metric_name(group, metric_name)] = _to_scalar(value)
+
+
+def _normalize_extra_metric_key(key: str) -> str | None:
+    parts = [part for part in key.split("/") if part]
+    if not parts:
+        return None
+    if parts[0] in {"train", "eval"}:
+        parts = parts[1:]
+    if not parts:
+        return None
+    if len(parts) == 1:
+        return _group_metric_name("default", parts[0])
+    return _group_metric_name(parts[0], "_".join(parts[1:]))
+
+
+def _log_scalar_metrics(logger: Logger, metrics_to_log: dict[str, float], step: int) -> None:
+    if isinstance(logger, WandbLogger):
+        logger.experiment.log(metrics_to_log, commit=False)
+        return
+    if isinstance(logger, SwanLabLogger):
+        for key, value in metrics_to_log.items():
+            logger.log_scalar(key, value, step=step)
+        return
+    for key, value in metrics_to_log.items():
+        logger.log_scalar(key.replace("/", "_"), value, step=step)
+
+
 def _masked_mean(value: torch.Tensor, mask: torch.Tensor) -> float:
     """Compute the mean of value over masked entries.
 
@@ -27,6 +83,53 @@ def _masked_mean(value: torch.Tensor, mask: torch.Tensor) -> float:
     if selected.numel() == 0:
         return 0.0
     return selected.float().mean().item()
+
+
+def _resolve_hinge_status_for_logging(
+    info_td: TensorDictBase,
+    observation_td: TensorDictBase | None,
+) -> torch.Tensor | None:
+    info_hinge_status = info_td.get("hinge_status", None)
+    obs_hinge_status = None
+    if observation_td is not None and "self_hinge_status" in observation_td.keys():
+        obs_hinge_status = observation_td.get("self_hinge_status")
+
+    if info_hinge_status is not None:
+        if obs_hinge_status is not None:
+            if obs_hinge_status.ndim == info_hinge_status.ndim:
+                inferred_hinge_status = obs_hinge_status
+            elif obs_hinge_status.ndim == info_hinge_status.ndim + 1:
+                # History observations add a dedicated history axis before the
+                # trailing singleton feature dimension.
+                inferred_hinge_status = obs_hinge_status.select(-2, 0)
+            else:
+                raise AssertionError(
+                    "Unexpected self_hinge_status ndim while validating hinge "
+                    f"mask for logging: obs_shape={tuple(obs_hinge_status.shape)}, "
+                    f"info_shape={tuple(info_hinge_status.shape)}"
+                )
+
+            assert inferred_hinge_status.shape == info_hinge_status.shape, (
+                "Resolved hinge status shape mismatch during logging: "
+                f"obs_shape={tuple(obs_hinge_status.shape)}, "
+                f"inferred_shape={tuple(inferred_hinge_status.shape)}, "
+                f"info_shape={tuple(info_hinge_status.shape)}"
+            )
+            assert torch.equal(
+                inferred_hinge_status.to(torch.bool),
+                info_hinge_status.to(torch.bool),
+            ), (
+                "Resolved hinge status values do not match info['hinge_status']; "
+                "please check the inferred history dimension."
+            )
+        return info_hinge_status
+
+    if obs_hinge_status is None:
+        return None
+
+    if obs_hinge_status.ndim >= 5:
+        return obs_hinge_status.select(-2, 0)
+    return obs_hinge_status
 
 
 def init_logging(cfg, model_name: str):
@@ -84,65 +187,75 @@ def log_training(
             .expand(sampling_td.get("agents").shape)
             .unsqueeze(-1),
         )
-    info_ignore_keys={"episode_done",
-                      "done_all_hinged",
-                      "done_collision_with_agents",
-                      "done_collision_with_lanelets",
-                      "done_collision_with_exit_segments",}
-    metrics_to_log = {
-        f"train/learner/{key}": value.mean().item()
-        for key, value in training_td.items()
+    info_ignore_keys = {
+        "episode_done",
+        "done_all_hinged",
+        "done_collision_with_agents",
+        "done_collision_with_lanelets",
+        "done_collision_with_exit_segments",
+        "reward_phase_weight",
+        "reward_phase_platoon_weight",
     }
+    metrics_to_log: dict[str, float] = {}
+    for key, value in training_td.items():
+        _add_metric(metrics_to_log, "params", key, value)
 
     if "info" in sampling_td.get("agents").keys():
         info_td = sampling_td.get(("agents", "info"))
         next_info_td = sampling_td.get(("next", "agents", "info"), None)
         done_info_td = next_info_td if next_info_td is not None else info_td
         for key, value in info_td.items():
-            if key not in info_ignore_keys:
-                metrics_to_log.update(
-                    {
-                        f"train/info/{key}": value.mean().item()
-                    }
-                )
+            if key in info_ignore_keys or key.startswith(("reward_", "penalty_")):
+                continue
+            _add_metric(metrics_to_log, "info", key, value)
         observation_td = sampling_td.get(("agents", "observation"), None)
-        hinge_status = (
-            observation_td.get("self_hinge_status", None)
-            if observation_td is not None and "self_hinge_status" in observation_td.keys()
-            else None
-        )
-        if hinge_status is None:
-            hinge_status = info_td.get("hinge_status", None)
-        elif hinge_status.ndim > 0 and hinge_status.shape[-1] == 1 and hinge_status.shape[-2] > 1:
-            hinge_status = hinge_status.select(-2, 0)
+        hinge_status = _resolve_hinge_status_for_logging(info_td, observation_td)
         if hinge_status is not None:
             hinge_mask = hinge_status.to(torch.bool)
             non_hinge_mask = ~hinge_mask
             hinge_count = hinge_mask.float().sum().item()
             total_phase_count = float(hinge_mask.numel())
             platoon_count = total_phase_count - hinge_count
-            metrics_to_log["train/info/hinge_status_true_ratio"] = (
-                hinge_mask.float().mean().item()
+            _add_metric(metrics_to_log, "info", "hinge_status_true_ratio", hinge_mask.float().mean())
+            _add_metric(metrics_to_log, "info", "collector_hinge_sample_count", hinge_count)
+            _add_metric(metrics_to_log, "info", "collector_platoon_sample_count", platoon_count)
+            _add_metric(
+                metrics_to_log,
+                "info",
+                "collector_hinge_sample_ratio",
+                hinge_count / max(total_phase_count, 1.0),
             )
-            metrics_to_log["train/info/collector_hinge_sample_count"] = hinge_count
-            metrics_to_log["train/info/collector_platoon_sample_count"] = platoon_count
-            metrics_to_log["train/info/collector_hinge_sample_ratio"] = (
-                hinge_count / max(total_phase_count, 1.0)
-            )
-            metrics_to_log["train/info/collector_platoon_sample_ratio"] = (
-                platoon_count / max(total_phase_count, 1.0)
+            _add_metric(
+                metrics_to_log,
+                "info",
+                "collector_platoon_sample_ratio",
+                platoon_count / max(total_phase_count, 1.0),
             )
             for key, value in info_td.items():
-                if not isinstance(value, torch.Tensor) or not key.startswith("reward_"):
+                if (
+                    not isinstance(value, torch.Tensor)
+                    or key in info_ignore_keys
+                    or not key.startswith(("reward_", "penalty_"))
+                ):
                     continue
+                group = "reward" if key.startswith("reward_") else "penalty"
                 if "platoon" in key:
-                    metrics_to_log[f"train/info/{key}"] = _masked_mean(
-                        value, non_hinge_mask
-                    )
+                    grouped_value = _masked_mean(value, non_hinge_mask)
                 elif "hinge" in key:
-                    metrics_to_log[f"train/info/{key}"] = _masked_mean(
-                        value, hinge_mask
-                    )
+                    grouped_value = _masked_mean(value, hinge_mask)
+                else:
+                    grouped_value = value.mean().item()
+                _add_metric(metrics_to_log, group, key, grouped_value)
+        else:
+            for key, value in info_td.items():
+                if (
+                    not isinstance(value, torch.Tensor)
+                    or key in info_ignore_keys
+                    or not key.startswith(("reward_", "penalty_"))
+                ):
+                    continue
+                group = "reward" if key.startswith("reward_") else "penalty"
+                _add_metric(metrics_to_log, group, key, value)
         episode_success = done_info_td.get("episode_success", None)
         episode_failure = done_info_td.get("episode_failure", None)
         actual_done = sampling_td.get(("next", "done"), None)
@@ -153,17 +266,23 @@ def log_training(
                 success_rate = _masked_mean(
                     episode_success.float(), actual_done_mask
                 )
-                metrics_to_log["train/info/success_rate"] = success_rate
-                metrics_to_log["train/info/episode_success_count"] = (
-                    success_rate * actual_done_count
+                _add_metric(metrics_to_log, "info", "success_rate", success_rate)
+                _add_metric(
+                    metrics_to_log,
+                    "info",
+                    "episode_success_count",
+                    success_rate * actual_done_count,
                 )
             if episode_failure is not None:
                 failure_rate = _masked_mean(
                     episode_failure.float(), actual_done_mask
                 )
-                metrics_to_log["train/info/failure_rate"] = failure_rate
-                metrics_to_log["train/info/episode_failure_count"] = (
-                    failure_rate * actual_done_count
+                _add_metric(metrics_to_log, "info", "failure_rate", failure_rate)
+                _add_metric(
+                    metrics_to_log,
+                    "info",
+                    "episode_failure_count",
+                    failure_rate * actual_done_count,
                 )
             for key in (
                 "done_all_hinged",
@@ -173,8 +292,11 @@ def log_training(
             ):
                 value = done_info_td.get(key, None)
                 if value is not None:
-                    metrics_to_log[f"train/info/{key}_rate"] = _masked_mean(
-                        value.float(), actual_done_mask
+                    _add_metric(
+                        metrics_to_log,
+                        "info",
+                        f"{key}_rate",
+                        _masked_mean(value.float(), actual_done_mask),
                     )
 
     reward = sampling_td.get(("next", "agents", "reward")).mean(-2)  # Mean over agents
@@ -184,25 +306,29 @@ def log_training(
     episode_reward = sampling_td.get(("next", "agents", "episode_reward")).mean(-2)[
         done
     ]
-    metrics_to_log.update(
-        {
-            "train/reward/reward_min": reward.min().item(),
-            "train/reward/reward_mean": reward.mean().item(),
-            "train/reward/reward_max": reward.max().item(),
-            "train/reward/episode_reward_min": episode_reward.min().item(),
-            "train/reward/episode_reward_mean": episode_reward.mean().item(),
-            "train/reward/episode_reward_max": episode_reward.max().item(),
-            "train/sampling_time": sampling_time,
-            "train/training_time": training_time,
-            "train/iteration_time": training_time + sampling_time,
-            "train/total_time": total_time,
-            "train/training_iteration": iteration,
-            "train/current_frames": current_frames,
-            "train/total_frames": total_frames,
-        }
-    )
+    if episode_reward.numel() == 0:
+        episode_reward = reward.new_zeros(1)
+    _add_metric(metrics_to_log, "reward", "reward_min", reward.min())
+    _add_metric(metrics_to_log, "reward", "reward_mean", reward.mean())
+    _add_metric(metrics_to_log, "reward", "reward_max", reward.max())
+    _add_metric(metrics_to_log, "reward", "episode_reward_min", episode_reward.min())
+    _add_metric(metrics_to_log, "reward", "episode_reward_mean", episode_reward.mean())
+    _add_metric(metrics_to_log, "reward", "episode_reward_max", episode_reward.max())
+    _add_metric(metrics_to_log, "default", "sampling_time", sampling_time)
+    _add_metric(metrics_to_log, "default", "training_time", training_time)
+    _add_metric(metrics_to_log, "default", "iteration_time", training_time + sampling_time)
+    _add_metric(metrics_to_log, "default", "total_time", total_time)
+    _add_metric(metrics_to_log, "default", "training_iteration", iteration)
+    _add_metric(metrics_to_log, "default", "current_frames", current_frames)
+    _add_metric(metrics_to_log, "default", "total_frames", total_frames)
     if extra_metrics:
-        metrics_to_log.update(extra_metrics)
+        for key, value in extra_metrics.items():
+            if "adaptive_weighting" in key:
+                continue
+            normalized_key = _normalize_extra_metric_key(key)
+            if normalized_key is None:
+                continue
+            metrics_to_log[normalized_key] = _to_scalar(value)
     try:
         env_total_step = sampling_td.get(("agents", "info", "env_total_step"))[:, :, 0, 0] #shape[batch_size, T]
         road_batch_id = sampling_td.get(("agents", "info", "road_batch_id"))[:, -1, 0, 0].to(torch.int64) #shape[batch_size]
@@ -233,24 +359,16 @@ def log_training(
         env_max_step = torch.max(max_per_env, dim=0)[0]
         env_min_step = torch.min(min_per_env, dim=0)[0]
         env_mean_step = torch.sum(sum_per_env, dim=0)/torch.sum(count_per_env, dim=0)
-        metrics_to_log.update({
-            "train/road_mean_step": road_mean_step.mean().float().item(),
-            "train/road_max_step": road_max_step.mean().float().item(),
-            "train/road_min_step": road_min_step.mean().float().item(),
-            "train/env_max_step": env_max_step.float().item(),
-            "train/env_min_step": env_min_step.float().item(),
-            "train/env_mean_step": env_mean_step.float().item(),
-        })
+        _add_metric(metrics_to_log, "road", "road_mean_step", road_mean_step.mean())
+        _add_metric(metrics_to_log, "road", "road_max_step", road_max_step.mean())
+        _add_metric(metrics_to_log, "road", "road_min_step", road_min_step.mean())
+        _add_metric(metrics_to_log, "road", "env_max_step", env_max_step)
+        _add_metric(metrics_to_log, "road", "env_min_step", env_min_step)
+        _add_metric(metrics_to_log, "road", "env_mean_step", env_mean_step)
         for i in range(road_mean_step.shape[0]):
-            metrics_to_log.update({
-                f"train/road_{i}_mean_step": road_mean_step.float()[i].item(),
-            })
-            metrics_to_log.update({
-                f"train/road_{i}_max_step": road_max_step.float()[i].item(),
-            })
-            metrics_to_log.update({
-                f"train/road_{i}_min_step": road_min_step.float()[i].item(),
-            })
+            _add_metric(metrics_to_log, "road", f"road_{i}_mean_step", road_mean_step.float()[i])
+            _add_metric(metrics_to_log, "road", f"road_{i}_max_step", road_max_step.float()[i])
+            _add_metric(metrics_to_log, "road", f"road_{i}_min_step", road_min_step.float()[i])
         road_min_step_formatted = [int(round(x, 0)) for x in road_min_step.tolist()]
         road_mean_step_formatted = [int(round(x, 0)) for x in road_mean_step.tolist()]
         road_max_step_formatted = [int(round(x, 0)) for x in road_max_step.tolist()]
@@ -262,11 +380,7 @@ def log_training(
         print(f"Warning: Could not extract max_episode_step_reached from info: {e}")
         pass
 
-    if isinstance(logger, WandbLogger):
-        logger.experiment.log(metrics_to_log, commit=False)
-    else:
-        for key, value in metrics_to_log.items():
-            logger.log_scalar(key.replace("/", "_"), value, step=step)
+    _log_scalar_metrics(logger, metrics_to_log, step)
 
     return metrics_to_log
 

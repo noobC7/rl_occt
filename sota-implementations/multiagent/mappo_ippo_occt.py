@@ -87,6 +87,22 @@ def _masked_tensor_mean(value: torch.Tensor, mask: torch.Tensor) -> torch.Tensor
     return value.sum() * 0.0
 
 
+def _compute_total_grad_norm(
+    parameters: list[torch.nn.Parameter], norm_type: float = 2.0
+) -> torch.Tensor:
+    if not parameters:
+        return torch.zeros((), dtype=torch.float32)
+    gradients = [param.grad.detach() for param in parameters if param.grad is not None]
+    if not gradients:
+        return torch.zeros((), dtype=torch.float32, device=parameters[0].device)
+
+    if norm_type == float("inf"):
+        return torch.stack([grad.abs().max() for grad in gradients]).max()
+
+    grad_norms = torch.stack([torch.norm(grad, norm_type) for grad in gradients])
+    return torch.norm(grad_norms, norm_type)
+
+
 def _reduce_metric(value) -> torch.Tensor:
     if isinstance(value, torch.Tensor):
         return value.mean()
@@ -1678,6 +1694,7 @@ def train(cfg: DictConfig):
         ValueEstimators.GAE, gamma=cfg.loss.gamma, lmbda=cfg.loss.lmbda
     )
     optim = torch.optim.Adam(loss_module.parameters(), cfg.train.lr)
+    trainable_params = [param for param in loss_module.parameters() if param.requires_grad]
 
     if resume_from_checkpoint and os.path.exists(resume_from_checkpoint):
         start_iteration, start_frames = load_checkpoint(
@@ -1796,7 +1813,9 @@ def train(cfg: DictConfig):
                 )
             advantage_layout_logged = True
         phase_state = phase_weight_controller.collector_state(tensordict_data)
-        iteration_extra_metrics = phase_state["metrics"]
+        iteration_extra_metrics = (
+            phase_state["metrics"] if phase_weight_controller.enabled else None
+        )
         current_frames = tensordict_data.numel()
         total_frames += current_frames
         data_view = tensordict_data.reshape(-1)
@@ -1839,10 +1858,20 @@ def train(cfg: DictConfig):
 
                 loss_value.backward()
 
-                total_norm = torch.nn.utils.clip_grad_norm_(
-                    loss_module.parameters(), cfg.train.max_grad_norm
+                total_norm_before_clip = torch.nn.utils.clip_grad_norm_(
+                    trainable_params, cfg.train.max_grad_norm
                 )
-                training_tds[-1].set("grad_norm", total_norm.mean())
+                total_norm_after_clip = _compute_total_grad_norm(trainable_params)
+                max_grad_norm = float(cfg.train.max_grad_norm)
+                assert total_norm_after_clip.item() <= max_grad_norm + 1e-4, (
+                    "Gradient clipping did not bound the post-clip norm as expected: "
+                    f"post_clip={total_norm_after_clip.item():.6f}, "
+                    f"limit={max_grad_norm:.6f}"
+                )
+                training_tds[-1].set("grad_norm", total_norm_after_clip.detach())
+                training_tds[-1].set(
+                    "grad_norm_before_clip", total_norm_before_clip.detach()
+                )
 
                 optim.step()
                 optim.zero_grad()

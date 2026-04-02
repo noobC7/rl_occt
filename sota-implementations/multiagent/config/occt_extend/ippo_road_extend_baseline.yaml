@@ -55,7 +55,7 @@ env:
 
 model:
   shared_parameters: True
-  centralised_critic: True
+  centralised_critic: False
   is_actor_retentive: False
   is_critic_bi_head: False
   actor:
@@ -96,8 +96,6 @@ train:
   device: ???
   resume_mode: resume # fine_tune, resume or warm_start
   resume_from_checkpoint: null
-  #resume_from_checkpoint: /home/yons/Graduation/rl_occt/outputs/2026-04-02/00-09-37_mlp_baseline_train/checkpoints/checkpoint_iter_299_frames_18000000.pt
-  #resume_from_checkpoint: /home/yons/Graduation/rl_occt/outputs/2026-03-31/19-30-28_extend_road_baseline/checkpoints/checkpoint_iter_299_frames_18000000.pt # model pth file absolute path
   
 eval:
   evaluation_interval: 10
@@ -108,6 +106,6 @@ logger:
   backend: swanlab
   project_name: "MAPPO_OCCT_NORMAL_EXTEND"
   group_name: "mlp_full_obse"
-  description: "baseline,道路除了环岛都是规则的，预计不让road4有太多奇怪的碰撞"
+  description: "ippo,道路除了环岛都是规则的，预计不让road4有太多奇怪的碰撞"
   resume_swanlab_id: null
   mode: cloud # cloud or local

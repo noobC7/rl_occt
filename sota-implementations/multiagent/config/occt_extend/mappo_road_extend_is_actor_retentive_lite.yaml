@@ -5,6 +5,7 @@ env:
   eval_max_steps: 1500
   scenario_name: "occt_scenario"
   scenario:
+    target_road_id: 1
     enable_obs_audit: False
     viewer_zoom: 20.0
     resolution_factor: 3
@@ -64,6 +65,7 @@ model:
       include: null
       exclude:
         - self_hinge_status
+        - self_hinge_past_info
     retentive:
       branch_hidden: 48
       lstm_hidden: 24
@@ -123,11 +125,12 @@ train:
   num_epochs: 45
   minibatch_size: 4096
   lr: 5e-5
-  max_grad_norm: 1.0  # 降低到1.0，LSTM训练更稳定
+  max_grad_norm: 40.0  # 降低到1.0，LSTM训练更稳定
   device: ???
   resume_mode: null # fine_tune, resume or warm_start
-  resume_from_checkpoint: null # model pth file absolute path
-
+  #resume_from_checkpoint: 300epoch pt file: /home/yons/Graduation/rl_occt/outputs/2026-04-02/00-02-50_retentive_actor_train/checkpoints/checkpoint_iter_299_frames_18000000.pt # model pth file absolute path
+  # resume_from_checkpoint: /home/yons/Graduation/rl_occt/outputs/2026-04-02/21-08-20/checkpoints/checkpoint_iter_20_frames_1260000.pt
+  resume_from_checkpoint: null
 eval:
   evaluation_interval: 10
   evaluation_episodes: 6
@@ -135,8 +138,8 @@ eval:
 
 logger:
   backend: swanlab
-  project_name: "MAPPO_OCCT_EXTEND"
+  project_name: "MAPPO_OCCT_NORMAL_EXTEND"
   group_name: "retentive_actor_lite"
-  description: "轻量级retentive actor - actor params tuned to match baseline level"
+  description: "轻量级retentive actor - actor params tuned to match baseline level, 增加road4比例进行微调（只加载actor），提高了entropy_eps和clip_epsilon参数,道路除了环岛都是规则的，预计不让road4有太多奇怪的碰撞"
   resume_swanlab_id: null
   mode: cloud # cloud or local
