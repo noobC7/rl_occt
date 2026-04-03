@@ -8,6 +8,12 @@ from tqdm import tqdm
 from tensordict import TensorDict, TensorDictBase
 from tensordict.nn import TensorDictModule
 from tensordict.nn.distributions import NormalParamExtractor
+
+try:
+    from torch.func import jacrev, vmap
+except ImportError:
+    from functorch import jacrev, vmap
+
 from torchrl._utils import logger as torchrl_logger
 from torchrl.collectors import SyncDataCollector
 from torchrl.data import TensorDictReplayBuffer
@@ -528,6 +534,35 @@ def build_mlp(
     return nn.Sequential(*layers)
 
 
+def build_lipsnet_mlp(
+    sizes: list[int],
+    activation_class: type[nn.Module],
+    output_activation_class: type[nn.Module] | None = None,
+) -> nn.Sequential:
+    layers: list[nn.Module] = []
+    for idx in range(len(sizes) - 2):
+        linear = nn.Linear(sizes[idx], sizes[idx + 1])
+        layers.extend((linear, activation_class()))
+    final_linear = nn.Linear(sizes[-2], sizes[-1])
+    layers.append(final_linear)
+    if output_activation_class is not None:
+        layers.append(output_activation_class())
+    net = nn.Sequential(*layers)
+
+    for idx, module in enumerate(net):
+        if not isinstance(module, nn.Linear):
+            continue
+        next_module = net[idx + 1] if idx + 1 < len(net) else None
+        if isinstance(next_module, nn.ReLU):
+            nn.init.kaiming_normal_(module.weight, nonlinearity="relu")
+        elif isinstance(next_module, nn.LeakyReLU):
+            nn.init.kaiming_normal_(module.weight, nonlinearity="leaky_relu")
+        else:
+            nn.init.xavier_normal_(module.weight)
+        nn.init.zeros_(module.bias)
+    return net
+
+
 def resolve_hidden_sizes(
     depth: int,
     num_cells: int | list[int] | tuple[int, ...],
@@ -548,9 +583,34 @@ def _normalize_optional_cfg_value(value):
     return value
 
 
+def maybe_int(value):
+    value = _normalize_optional_cfg_value(value)
+    if value is None:
+        return None
+    return int(value)
+
+
+def maybe_int_list(value):
+    value = _normalize_optional_cfg_value(value)
+    if value is None:
+        return None
+    if isinstance(value, str):
+        normalized = value.strip().lower()
+        if normalized in {"none", "null", ""}:
+            return None
+        return [int(item.strip()) for item in value.split(",") if item.strip()]
+    return [int(item) for item in value]
+
+
 def configure_advanced_model_inputs(cfg: DictConfig) -> None:
     is_actor_retentive = bool(cfg.model.get("is_actor_retentive", False))
+    use_lipsnet_actor = bool(cfg.model.get("use_lipsnet_actor", False))
     is_critic_bi_head = bool(cfg.model.get("is_critic_bi_head", False))
+
+    if use_lipsnet_actor and is_actor_retentive:
+        raise ValueError(
+            "model.use_lipsnet_actor and model.is_actor_retentive cannot be enabled at the same time."
+        )
 
     if is_actor_retentive:
         if not bool(cfg.env.scenario.get("use_history_observation", False)):
@@ -679,6 +739,43 @@ def _flatten_named_leaf_preserve_time(
     return value.flatten(batch_dims + 1, -1)
 
 
+def infer_named_lipsnet_history_layout(
+    obs_sample: TensorDictBase,
+    *,
+    obs_keys: list[str],
+) -> dict[str, object]:
+    batch_dims = obs_sample.batch_dims
+    obs_len = None
+    obs_dim = 0
+    feature_slices: dict[str, slice] = {}
+    for key in obs_keys:
+        value = obs_sample.get(key)
+        if value.ndim <= batch_dims + 1:
+            raise RuntimeError(
+                "LipsNet actor requires history observations for every selected actor key. "
+                f"Key '{key}' has shape {tuple(value.shape)} with batch_dims={batch_dims}."
+            )
+        key_obs_len = int(value.shape[batch_dims])
+        if obs_len is None:
+            obs_len = key_obs_len
+        elif obs_len != key_obs_len:
+            raise RuntimeError(
+                "LipsNet actor expects a shared history length across all actor keys, "
+                f"but key '{key}' has history_len={key_obs_len} while previous keys use {obs_len}."
+            )
+        flat_value = _flatten_named_leaf_preserve_time(value, batch_dims=batch_dims)
+        key_obs_dim = int(flat_value.shape[-1])
+        feature_slices[key] = slice(obs_dim, obs_dim + key_obs_dim)
+        obs_dim += key_obs_dim
+    if obs_len is None:
+        raise ValueError("LipsNet actor resolved to an empty actor observation-key list.")
+    return {
+        "obs_len": obs_len,
+        "obs_dim": obs_dim,
+        "feature_slices": feature_slices,
+    }
+
+
 def infer_named_observation_layout(
     obs_sample: TensorDictBase,
     *,
@@ -775,6 +872,395 @@ class NamedObservationProjector(nn.Module):
             )
             flat_values.append(_flatten_named_leaf(value, batch_dims=batch_dims))
         return torch.cat(flat_values, dim=-1)
+
+
+class NamedLipsNetObservationProjector(nn.Module):
+    def __init__(
+        self,
+        *,
+        obs_keys: list[str],
+        latest_history_index: int,
+    ) -> None:
+        super().__init__()
+        self.obs_keys = obs_keys
+        self.latest_history_index = latest_history_index
+
+    def forward(self, obs: TensorDictBase) -> torch.Tensor:
+        if not isinstance(obs, TensorDictBase):
+            raise TypeError(
+                "NamedLipsNetObservationProjector expects TensorDict observations, "
+                f"got {type(obs).__name__}."
+            )
+        batch_dims = obs.batch_dims
+        history_values = []
+        history_len = None
+        for key in self.obs_keys:
+            value = obs.get(key)
+            if value.ndim <= batch_dims + 1:
+                raise RuntimeError(
+                    "LipsNet actor requires history observations for every selected actor key. "
+                    f"Key '{key}' has shape {tuple(value.shape)} with batch_dims={batch_dims}."
+                )
+            key_history_len = int(value.shape[batch_dims])
+            if history_len is None:
+                history_len = key_history_len
+            elif history_len != key_history_len:
+                raise RuntimeError(
+                    "LipsNet actor expects a shared history length across all actor keys, "
+                    f"but key '{key}' has history_len={key_history_len} while previous keys use {history_len}."
+                )
+            flat_value = _flatten_named_leaf_preserve_time(value, batch_dims=batch_dims)
+            flat_value = maybe_reverse_history_sequence(
+                flat_value.to(torch.float32),
+                latest_index=self.latest_history_index,
+                time_dim=batch_dims,
+            )
+            history_values.append(flat_value)
+        return torch.cat(history_values, dim=-1)
+
+
+class LipsNetAgent(nn.Module):
+    def __init__(
+        self,
+        *,
+        obs_len: int,
+        obs_dim: int,
+        out_features: int,
+        hidden_sizes: list[int],
+        activation_class: type[nn.Module] = nn.Tanh,
+        lambda_t: float = 0.1,
+        lambda_k: float = 0.0,
+        kernel_scale: float = 0.02,
+        norm_layer_type: str = "none",
+        jacobian_samples: int | None = None,
+        action_dim: int | None = None,
+        controller_mode: str = "single_head",
+        steering_action_index: int = -1,
+        phase_feature_indices: list[int] | None = None,
+        phase_weight_scale: float = 1.0,
+    ) -> None:
+        super().__init__()
+        self.obs_len = obs_len
+        self.obs_dim = obs_dim
+        self.lambda_t = float(lambda_t)
+        self.lambda_k = float(lambda_k)
+        self.jacobian_samples = jacobian_samples
+        self.norm_layer_type = norm_layer_type
+        self.controller_mode = controller_mode
+        if controller_mode != "single_head":
+            raise ValueError(
+                "mappo_ippo_occt LipsNet actor only supports controller_mode='single_head'."
+            )
+        self.action_dim = None
+        self.steering_action_index = -1
+        self.phase_feature_indices = []
+        self.phase_weight_scale = 1.0
+
+        if norm_layer_type == "batch_norm":
+            self.norm_layer = nn.BatchNorm1d(obs_dim)
+        elif norm_layer_type == "layer_norm":
+            self.norm_layer = nn.LayerNorm(obs_dim)
+        elif norm_layer_type == "none":
+            self.norm_layer = None
+        else:
+            raise ValueError(
+                f"Unsupported LipsNet norm_layer_type='{norm_layer_type}'."
+            )
+
+        self.filter_kernel = nn.Parameter(
+            torch.cat(
+                [
+                    torch.ones(obs_len, obs_dim // 2 + 1, 1, dtype=torch.float32),
+                    torch.randn(obs_len, obs_dim // 2 + 1, 1, dtype=torch.float32)
+                    * kernel_scale,
+                ],
+                dim=2,
+            )
+        )
+        mlp_sizes = [obs_dim, *hidden_sizes, out_features]
+        self.mlp = build_lipsnet_mlp(
+            mlp_sizes,
+            activation_class=activation_class,
+            output_activation_class=None,
+        )
+        self._clear_last_stats()
+
+    def _clear_last_stats(self) -> None:
+        self._last_regularization = None
+        self._last_filter_penalty = None
+        self._last_jacobian_penalty = None
+        self._last_jacobian_norm = None
+        self._last_phase_weight = None
+
+    def _zero_scalar(self, ref: torch.Tensor) -> torch.Tensor:
+        return ref.new_zeros(())
+
+    def _normalize_history(self, history: torch.Tensor) -> torch.Tensor:
+        if self.norm_layer is None:
+            return history
+        if self.norm_layer_type == "batch_norm":
+            return self.norm_layer(history.reshape(-1, self.obs_dim)).reshape(history.shape)
+        return self.norm_layer(history)
+
+    def _extract_phase_weight(self, history_obs: torch.Tensor) -> torch.Tensor | None:
+        return None
+
+    def _broadcast_phase_weight(
+        self, phase_weight: torch.Tensor | None, target: torch.Tensor
+    ) -> torch.Tensor:
+        if phase_weight is None:
+            return target.new_zeros(*target.shape[:-1], 1)
+        while phase_weight.ndim < target.ndim:
+            phase_weight = phase_weight.unsqueeze(-1)
+        return phase_weight
+
+    def _controller_forward(
+        self, features: torch.Tensor, phase_weight: torch.Tensor | None = None
+    ) -> torch.Tensor:
+        return self.mlp(features)
+
+    def _compute_filter_penalty(self, ref: torch.Tensor) -> torch.Tensor:
+        if self.lambda_t == 0.0:
+            return self._zero_scalar(ref)
+        return self.lambda_t * (self.filter_kernel.square().sum())
+
+    def _compute_jacobian_penalty(
+        self,
+        x_result: torch.Tensor,
+        ref: torch.Tensor,
+        phase_weight: torch.Tensor | None = None,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        if self.lambda_k == 0.0:
+            zero = self._zero_scalar(ref)
+            return zero, zero
+
+        jacobian_inputs = x_result.detach()
+        jacobian_phase_weight = phase_weight.detach() if phase_weight is not None else None
+        if (
+            self.jacobian_samples is not None
+            and jacobian_inputs.shape[0] > self.jacobian_samples
+        ):
+            sampled_indices = torch.randperm(
+                jacobian_inputs.shape[0],
+                device=jacobian_inputs.device,
+            )[: self.jacobian_samples]
+            jacobian_inputs = jacobian_inputs[sampled_indices]
+            if jacobian_phase_weight is not None:
+                jacobian_phase_weight = jacobian_phase_weight[sampled_indices]
+
+        if jacobian_phase_weight is None:
+            jacobian = vmap(jacrev(lambda inputs: self._controller_forward(inputs)))(
+                jacobian_inputs
+            )
+        else:
+            jacobian = vmap(
+                jacrev(
+                    lambda inputs, weight: self._controller_forward(inputs, weight),
+                    argnums=0,
+                )
+            )(jacobian_inputs, jacobian_phase_weight)
+        jacobian_norm = torch.norm(jacobian, 2, dim=(-2, -1)).mean()
+        return self.lambda_k * jacobian_norm, jacobian_norm
+
+    def forward(self, history_obs: torch.Tensor) -> torch.Tensor:
+        if history_obs.shape[-2:] != (self.obs_len, self.obs_dim):
+            raise ValueError(
+                "LipsNetAgent expected per-agent history observations with shape "
+                f"(*, {self.obs_len}, {self.obs_dim}), got {tuple(history_obs.shape)}."
+            )
+
+        flat_history = history_obs.reshape(-1, self.obs_len, self.obs_dim)
+        flat_history = self._normalize_history(flat_history)
+        history_fft = torch.fft.rfft2(
+            flat_history,
+            s=(self.obs_len, self.obs_dim),
+            dim=(-2, -1),
+            norm="ortho",
+        )
+        kernel = torch.view_as_complex(self.filter_kernel)
+        filtered_history = torch.fft.irfft2(
+            history_fft * kernel,
+            s=(self.obs_len, self.obs_dim),
+            dim=(-2, -1),
+            norm="ortho",
+        )
+        filtered_features = filtered_history[..., 0, :]
+        phase_weight = self._extract_phase_weight(history_obs)
+        if phase_weight is not None:
+            self._last_phase_weight = phase_weight.mean().detach()
+        else:
+            self._last_phase_weight = None
+        output = self._controller_forward(filtered_features, phase_weight).reshape(
+            *history_obs.shape[:-2], -1
+        )
+
+        compute_regularization = (
+            self.training
+            and torch.is_grad_enabled()
+            and output.requires_grad
+        )
+        if not compute_regularization:
+            zero = self._zero_scalar(output)
+            self._last_regularization = zero
+            self._last_filter_penalty = zero
+            self._last_jacobian_penalty = zero
+            self._last_jacobian_norm = zero
+            return output
+
+        filter_penalty = self._compute_filter_penalty(output)
+        jacobian_penalty, jacobian_norm = self._compute_jacobian_penalty(
+            filtered_features,
+            output,
+            phase_weight=phase_weight,
+        )
+        self._last_filter_penalty = filter_penalty
+        self._last_jacobian_penalty = jacobian_penalty
+        self._last_jacobian_norm = jacobian_norm
+        self._last_regularization = filter_penalty + jacobian_penalty
+        return output
+
+    def pop_regularization_stats(self) -> dict[str, torch.Tensor]:
+        stats = {
+            "regularization_loss": self._last_regularization,
+            "filter_penalty": self._last_filter_penalty,
+            "jacobian_penalty": self._last_jacobian_penalty,
+            "jacobian_norm": self._last_jacobian_norm,
+            "phase_weight_mean": self._last_phase_weight,
+        }
+        self._clear_last_stats()
+        return stats
+
+
+class LipsNetMultiAgentBackbone(nn.Module):
+    def __init__(
+        self,
+        *,
+        obs_len: int,
+        obs_dim: int,
+        n_agent_outputs: int,
+        n_agents: int,
+        share_params: bool,
+        device: torch.device | str,
+        depth: int,
+        num_cells: int | list[int] | tuple[int, ...],
+        activation_class: type[nn.Module] = nn.Tanh,
+        lambda_t: float = 0.1,
+        lambda_k: float = 0.0,
+        kernel_scale: float = 0.02,
+        norm_layer_type: str = "none",
+        jacobian_samples: int | None = None,
+        action_dim: int | None = None,
+        controller_mode: str = "single_head",
+        steering_action_index: int = -1,
+        phase_feature_indices: list[int] | None = None,
+        phase_weight_scale: float = 1.0,
+    ) -> None:
+        super().__init__()
+        self.obs_len = obs_len
+        self.obs_dim = obs_dim
+        self.n_agents = n_agents
+        self.n_agent_outputs = n_agent_outputs
+        self.share_params = share_params
+        hidden_sizes = resolve_hidden_sizes(depth, num_cells)
+        network_count = 1 if share_params else n_agents
+        self.agent_networks = nn.ModuleList(
+            [
+                LipsNetAgent(
+                    obs_len=obs_len,
+                    obs_dim=obs_dim,
+                    out_features=n_agent_outputs,
+                    hidden_sizes=hidden_sizes,
+                    activation_class=activation_class,
+                    lambda_t=lambda_t,
+                    lambda_k=lambda_k,
+                    kernel_scale=kernel_scale,
+                    norm_layer_type=norm_layer_type,
+                    jacobian_samples=jacobian_samples,
+                    action_dim=action_dim,
+                    controller_mode=controller_mode,
+                    steering_action_index=steering_action_index,
+                    phase_feature_indices=phase_feature_indices,
+                    phase_weight_scale=phase_weight_scale,
+                ).to(device)
+                for _ in range(network_count)
+            ]
+        )
+        self._clear_last_stats()
+
+    def _clear_last_stats(self) -> None:
+        self._last_regularization = None
+        self._last_filter_penalty = None
+        self._last_jacobian_penalty = None
+        self._last_jacobian_norm = None
+        self._last_phase_weight = None
+
+    def _zero_scalar(self, ref: torch.Tensor) -> torch.Tensor:
+        return ref.new_zeros(())
+
+    def _collect_regularization_stats(
+        self, stats_list: list[dict[str, torch.Tensor]], ref: torch.Tensor
+    ) -> None:
+        if not stats_list:
+            zero = self._zero_scalar(ref)
+            self._last_regularization = zero
+            self._last_filter_penalty = zero
+            self._last_jacobian_penalty = zero
+            self._last_jacobian_norm = zero
+            self._last_phase_weight = zero
+            return
+
+        def _average(key: str) -> torch.Tensor:
+            values = [stats[key] for stats in stats_list if stats[key] is not None]
+            if not values:
+                return self._zero_scalar(ref)
+            return torch.stack(values).mean()
+
+        self._last_regularization = _average("regularization_loss")
+        self._last_filter_penalty = _average("filter_penalty")
+        self._last_jacobian_penalty = _average("jacobian_penalty")
+        self._last_jacobian_norm = _average("jacobian_norm")
+        self._last_phase_weight = _average("phase_weight_mean")
+
+    def forward(self, obs: torch.Tensor) -> torch.Tensor:
+        if obs.shape[-3] != self.n_agents:
+            raise ValueError(
+                f"LipsNetMultiAgentBackbone expected obs.shape[-3] == {self.n_agents}, got {tuple(obs.shape)}."
+            )
+        if obs.shape[-2:] != (self.obs_len, self.obs_dim):
+            raise ValueError(
+                "LipsNetMultiAgentBackbone expected history observations with shape "
+                f"(*, {self.n_agents}, {self.obs_len}, {self.obs_dim}), got {tuple(obs.shape)}."
+            )
+
+        if self.share_params:
+            shared_output = self.agent_networks[0](
+                obs.reshape(-1, self.obs_len, self.obs_dim)
+            )
+            output = shared_output.reshape(*obs.shape[:-2], self.n_agent_outputs)
+            stats_list = [self.agent_networks[0].pop_regularization_stats()]
+            self._collect_regularization_stats(stats_list, output)
+            return output
+
+        outputs = []
+        stats_list = []
+        for agent_idx, agent_network in enumerate(self.agent_networks):
+            agent_output = agent_network(obs[..., agent_idx, :, :])
+            outputs.append(agent_output.unsqueeze(-2))
+            stats_list.append(agent_network.pop_regularization_stats())
+        output = torch.cat(outputs, dim=-2)
+        self._collect_regularization_stats(stats_list, output)
+        return output
+
+    def pop_regularization_stats(self) -> dict[str, torch.Tensor]:
+        stats = {
+            "regularization_loss": self._last_regularization,
+            "filter_penalty": self._last_filter_penalty,
+            "jacobian_penalty": self._last_jacobian_penalty,
+            "jacobian_norm": self._last_jacobian_norm,
+            "phase_weight_mean": self._last_phase_weight,
+        }
+        self._clear_last_stats()
+        return stats
 
 
 class NamedPhaseExtractor(nn.Module):
@@ -1406,6 +1892,7 @@ def train(cfg: DictConfig):
 
     share_params = bool(cfg.model.shared_parameters)
     is_actor_retentive = bool(cfg.model.get("is_actor_retentive", False))
+    use_lipsnet_actor = bool(cfg.model.get("use_lipsnet_actor", False))
     is_critic_bi_head = bool(cfg.model.get("is_critic_bi_head", False))
     use_phase_conditioned_network = bool(
         cfg.model.get("use_phase_conditioned_network", False)
@@ -1432,10 +1919,22 @@ def train(cfg: DictConfig):
             "OCCT training now expects dictionary-based observations from the scenario. "
             f"Got observation type {type(sample_obs).__name__} instead."
         )
-    if uses_history_observation and not is_actor_retentive:
+    if use_lipsnet_actor and not uses_history_observation:
         raise RuntimeError(
-            "is_actor_retentive=False does not allow multi-frame history observations. "
-            "Disable env.scenario.use_history_observation or enable model.is_actor_retentive."
+            "LipsNet actor requires env.scenario.use_history_observation=True."
+        )
+    if use_lipsnet_actor and _normalize_optional_cfg_value(
+        cfg.env.scenario.get("history_obs_dim", None)
+    ) is not None:
+        raise RuntimeError(
+            "LipsNet actor requires raw per-step history observations. "
+            "Set env.scenario.history_obs_dim=None."
+        )
+    if uses_history_observation and not (is_actor_retentive or use_lipsnet_actor):
+        raise RuntimeError(
+            "The default MLP actor does not allow multi-frame history observations. "
+            "Disable env.scenario.use_history_observation or enable model.is_actor_retentive "
+            "or model.use_lipsnet_actor."
         )
     obs_layout = infer_named_observation_layout(
         sample_obs,
@@ -1468,7 +1967,8 @@ def train(cfg: DictConfig):
     if use_phase_conditioned_network:
         torchrl_logger.warning(
             "model.use_phase_conditioned_network now affects only the critic path. "
-            "The actor always uses either the standard single-head MLP or the retentive actor."
+            "The actor always uses either the standard single-head MLP, the LipsNet actor, "
+            "or the retentive actor."
         )
     phase_obs_group = None
     if use_phase_conditioned_network or is_critic_bi_head:
@@ -1484,6 +1984,9 @@ def train(cfg: DictConfig):
             "critic.phase_obs_key",
         )
 
+    lipsnet_actor_backbone = None
+    lipsnet_obs_len = None
+    lipsnet_obs_dim = None
     if is_actor_retentive:
         retentive_self_keys = resolve_model_obs_keys(
             available_keys=available_obs_keys,
@@ -1552,6 +2055,41 @@ def train(cfg: DictConfig):
             latest_history_index=history_latest_index,
             branch_hidden=actor_branch_hidden,  # 新增：从yaml读取
             lstm_hidden=actor_lstm_hidden,      # 新增：从yaml读取
+        )
+    elif use_lipsnet_actor:
+        lipsnet_layout = infer_named_lipsnet_history_layout(
+            sample_obs,
+            obs_keys=actor_obs_keys,
+        )
+        lipsnet_obs_len = int(lipsnet_layout["obs_len"])
+        lipsnet_obs_dim = int(lipsnet_layout["obs_dim"])
+        lipsnet_actor_backbone = LipsNetMultiAgentBackbone(
+            obs_len=lipsnet_obs_len,
+            obs_dim=lipsnet_obs_dim,
+            n_agent_outputs=2 * action_dim,
+            n_agents=env.n_agents,
+            share_params=share_params,
+            device=cfg.train.device,
+            depth=actor_depth,
+            num_cells=actor_num_cells,
+            activation_class=nn.Tanh,
+            lambda_t=float(cfg.model.get("lipsnet_lambda_t", 0.1)),
+            lambda_k=float(cfg.model.get("lipsnet_lambda_k", 0.0)),
+            kernel_scale=float(cfg.model.get("lipsnet_kernel_scale", 0.02)),
+            norm_layer_type=str(cfg.model.get("lipsnet_norm_layer_type", "none")),
+            jacobian_samples=maybe_int(cfg.model.get("lipsnet_jacobian_samples", None)),
+            action_dim=action_dim,
+            controller_mode="single_head",
+            steering_action_index=-1,
+            phase_feature_indices=None,
+            phase_weight_scale=1.0,
+        )
+        actor_backbone = nn.Sequential(
+            NamedLipsNetObservationProjector(
+                obs_keys=actor_obs_keys,
+                latest_history_index=history_latest_index,
+            ),
+            lipsnet_actor_backbone,
         )
     else:
         actor_backbone = nn.Sequential(
@@ -1720,6 +2258,8 @@ def train(cfg: DictConfig):
             model_prefix = "RetentiveBiHeadMAPPO"
         elif is_actor_retentive:
             model_prefix = "RetentiveMAPPO"
+        elif use_lipsnet_actor:
+            model_prefix = "MAPPO"
         elif is_critic_bi_head:
             model_prefix = "BiHeadMAPPO"
         elif use_phase_conditioned_network:
@@ -1732,6 +2272,8 @@ def train(cfg: DictConfig):
             and not cfg.model.centralised_critic
         ):
             model_prefix = "IPPO"
+        if use_lipsnet_actor:
+            model_prefix = "LipsNet" + model_prefix
         model_name = ("Het" if not cfg.model.shared_parameters else "") + model_prefix
         logger = init_logging(cfg, model_name)
 
@@ -1842,6 +2384,11 @@ def train(cfg: DictConfig):
                     log_advantage_layout("minibatch", subdata, loss_module, env.n_agents)
                     minibatch_layout_logged = True
                 loss_vals = loss_module(subdata)
+                lipsnet_stats = (
+                    lipsnet_actor_backbone.pop_regularization_stats()
+                    if lipsnet_actor_backbone is not None
+                    else None
+                )
                 platoon_mask, hinge_approach_mask = extract_training_phase_masks(
                     subdata
                 )
@@ -1854,6 +2401,37 @@ def train(cfg: DictConfig):
                     hinge_approach_mask,
                     active_phase_weights,
                 )
+                if lipsnet_stats is not None:
+                    lipsnet_regularization = lipsnet_stats["regularization_loss"]
+                    if lipsnet_regularization is not None:
+                        loss_value = loss_value + lipsnet_regularization
+                        training_summary.set(
+                            "loss_lipsnet_regularization",
+                            lipsnet_regularization.detach(),
+                        )
+                    if lipsnet_stats["filter_penalty"] is not None:
+                        training_summary.set(
+                            "loss_lipsnet_filter",
+                            lipsnet_stats["filter_penalty"].detach(),
+                        )
+                    if lipsnet_stats["jacobian_penalty"] is not None:
+                        training_summary.set(
+                            "loss_lipsnet_jacobian",
+                            lipsnet_stats["jacobian_penalty"].detach(),
+                        )
+                    if lipsnet_stats["jacobian_norm"] is not None:
+                        training_summary.set(
+                            "lipsnet_jacobian_norm",
+                            lipsnet_stats["jacobian_norm"].detach(),
+                        )
+                    training_summary.set(
+                        "lipsnet_obs_len",
+                        torch.tensor(float(lipsnet_obs_len), device=loss_value.device),
+                    )
+                    training_summary.set(
+                        "lipsnet_obs_dim",
+                        torch.tensor(float(lipsnet_obs_dim), device=loss_value.device),
+                    )
                 training_tds.append(training_summary.detach())
 
                 loss_value.backward()
