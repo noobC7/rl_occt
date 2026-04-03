@@ -181,6 +181,61 @@ def log_advantage_layout(tag: str, td, loss_module, n_agents: int) -> None:
     )
 
 
+def _format_agent_ratio_list(mask: torch.Tensor) -> list[float]:
+    mask = _ensure_phase_mask(mask).to(torch.float32)
+    mask = mask.squeeze(-1)
+    agent_axis = mask.ndim - 1
+    permute_order = [dim for dim in range(mask.ndim) if dim != agent_axis] + [agent_axis]
+    mask = mask.permute(*permute_order).reshape(-1, mask.shape[agent_axis])
+    return [round(float(value), 4) for value in mask.mean(dim=0).detach().cpu().tolist()]
+
+
+def log_agent_train_mask_usage(
+    tag: str,
+    td,
+    loss_vals,
+    train_active_mask: torch.Tensor,
+    platoon_mask: torch.Tensor,
+    hinge_approach_mask: torch.Tensor,
+) -> None:
+    done_train = _safe_get(td, ("next", "agents", "done_train"))
+    effective_platoon_mask = platoon_mask & train_active_mask
+    effective_hinge_approach_mask = hinge_approach_mask & train_active_mask
+
+    loss_reference = None
+    loss_reference_key = None
+    for key in ("loss_objective", "loss_critic", "loss_entropy"):
+        value = loss_vals.get(key, None)
+        if isinstance(value, torch.Tensor):
+            loss_reference = value
+            loss_reference_key = key
+            break
+
+    if loss_reference is None:
+        print(
+            f"[PPO][{tag}][agent-mask] No tensor-valued loss component found; "
+            "skipping mask usage debug."
+        )
+        return
+
+    expanded_train_mask = _expand_mask(train_active_mask, loss_reference)
+    expanded_platoon_mask = _expand_mask(effective_platoon_mask, loss_reference)
+    expanded_hinge_mask = _expand_mask(effective_hinge_approach_mask, loss_reference)
+
+    print(
+        f"[PPO][{tag}][agent-mask] "
+        f"train_active_shape={tuple(train_active_mask.shape)}, "
+        f"done_train_shape={None if done_train is None else tuple(done_train.shape)}, "
+        f"loss_key={loss_reference_key}, "
+        f"loss_shape={tuple(loss_reference.shape)}, "
+        f"active_elements={int(expanded_train_mask.sum().item())}/{expanded_train_mask.numel()}, "
+        f"platoon_elements={int(expanded_platoon_mask.sum().item())}, "
+        f"hinge_elements={int(expanded_hinge_mask.sum().item())}, "
+        f"per_agent_active_ratio={_format_agent_ratio_list(train_active_mask)}, "
+        f"per_agent_done_train_ratio={None if done_train is None else _format_agent_ratio_list(done_train)}"
+    )
+
+
 def extract_training_phase_masks(
     td,
     hinge_key: str = "self_hinge_status",
@@ -213,6 +268,67 @@ def extract_training_phase_masks(
     hinge_approach_mask = hinge_status & ~agent_hinged
     platoon_mask = (~hinge_status) & ~agent_hinged
     return platoon_mask, hinge_approach_mask
+
+
+def attach_agent_train_masks(
+    td,
+    *,
+    agent_hinged_key: str = "agent_hinge_status",
+) -> TensorDictBase:
+    current_hinged = _safe_get(td, ("agents", "info", agent_hinged_key))
+    next_hinged = _safe_get(td, ("next", "agents", "info", agent_hinged_key))
+    if current_hinged is None:
+        current_hinged = next_hinged
+    if next_hinged is None:
+        next_hinged = current_hinged
+    if current_hinged is None or next_hinged is None:
+        raise KeyError(
+            "Could not find agent_hinge_status in current/next info while building "
+            "training masks."
+        )
+
+    current_hinged = _ensure_phase_mask(current_hinged)
+    next_hinged = _ensure_phase_mask(next_hinged)
+
+    env_done = _safe_get(td, ("next", "agents", "done"))
+    if env_done is None:
+        env_done = _safe_get(td, ("next", "done"))
+    if env_done is None:
+        raise KeyError(
+            "Could not find next ('agents', 'done') or env-level ('done') while "
+            "building training masks."
+        )
+    env_done = _ensure_phase_mask(env_done)
+    env_done = _expand_mask(env_done, next_hinged)
+
+    train_active = ~current_hinged
+    done_train = env_done | next_hinged
+    td.set(("agents", "train_active"), train_active)
+    td.set(("next", "agents", "done_train"), done_train)
+    td.set(("next", "agents", "terminated_train"), done_train.clone())
+    return td
+
+
+def extract_agent_train_mask(
+    td,
+    *,
+    train_key: str = "train_active",
+    agent_hinged_key: str = "agent_hinge_status",
+) -> torch.Tensor:
+    train_mask = _safe_get(td, ("agents", train_key))
+    if train_mask is not None:
+        return _ensure_phase_mask(train_mask)
+
+    current_hinged = _safe_get(td, ("agents", "info", agent_hinged_key))
+    if current_hinged is None:
+        current_hinged = _safe_info_get(td, agent_hinged_key)
+    if current_hinged is None:
+        raise KeyError(
+            "Could not find train_active or agent_hinge_status while extracting "
+            "agent training mask."
+        )
+    current_hinged = _select_latest_phase_frame(current_hinged)
+    return ~_ensure_phase_mask(current_hinged)
 
 
 class MetricAdaptiveWeightController:
@@ -437,18 +553,21 @@ class MetricAdaptiveWeightController:
 
 def build_training_summary(
     loss_vals,
+    train_active_mask: torch.Tensor,
     platoon_mask: torch.Tensor,
     hinge_approach_mask: torch.Tensor,
     phase_weights: dict[str, torch.Tensor] | None,
 ) -> tuple[torch.Tensor, TensorDict]:
     summary = TensorDict({}, batch_size=[])
+    effective_platoon_mask = platoon_mask & train_active_mask
+    effective_hinge_approach_mask = hinge_approach_mask & train_active_mask
 
     if phase_weights is None:
         component_totals = []
         for key in ("loss_objective", "loss_critic", "loss_entropy"):
             if key not in loss_vals.keys():
                 continue
-            component_value = _reduce_metric(loss_vals[key])
+            component_value = _masked_tensor_mean(loss_vals[key], train_active_mask)
             summary.set(key, component_value.detach())
             component_totals.append(component_value)
         loss_value = sum(component_totals)
@@ -461,26 +580,28 @@ def build_training_summary(
         )
     else:
         weighted_component_totals = {}
-        platoon_has_samples = bool(platoon_mask.any().item())
-        hinge_has_samples = bool(hinge_approach_mask.any().item())
+        platoon_has_samples = bool(effective_platoon_mask.any().item())
+        hinge_has_samples = bool(effective_hinge_approach_mask.any().item())
         if platoon_has_samples and hinge_has_samples:
             platoon_weight = phase_weights["platoon"]
             hinge_weight = phase_weights["hinge_approach"]
         elif platoon_has_samples:
-            platoon_weight = torch.tensor(1.0, device=platoon_mask.device)
-            hinge_weight = torch.tensor(0.0, device=platoon_mask.device)
+            platoon_weight = torch.tensor(1.0, device=train_active_mask.device)
+            hinge_weight = torch.tensor(0.0, device=train_active_mask.device)
         elif hinge_has_samples:
-            platoon_weight = torch.tensor(0.0, device=platoon_mask.device)
-            hinge_weight = torch.tensor(1.0, device=platoon_mask.device)
+            platoon_weight = torch.tensor(0.0, device=train_active_mask.device)
+            hinge_weight = torch.tensor(1.0, device=train_active_mask.device)
         else:
-            platoon_weight = torch.tensor(1.0, device=platoon_mask.device)
-            hinge_weight = torch.tensor(0.0, device=platoon_mask.device)
+            platoon_weight = torch.tensor(1.0, device=train_active_mask.device)
+            hinge_weight = torch.tensor(0.0, device=train_active_mask.device)
         for key in ("loss_objective", "loss_critic", "loss_entropy"):
             if key not in loss_vals.keys():
                 continue
-            platoon_component = _masked_tensor_mean(loss_vals[key], platoon_mask)
+            platoon_component = _masked_tensor_mean(
+                loss_vals[key], effective_platoon_mask
+            )
             hinge_component = _masked_tensor_mean(
-                loss_vals[key], hinge_approach_mask
+                loss_vals[key], effective_hinge_approach_mask
             )
             weighted_component = (
                 platoon_weight * platoon_component
@@ -497,10 +618,13 @@ def build_training_summary(
             hinge_weight.detach(),
         )
 
-    summary.set("adaptive_ratio_platoon", platoon_mask.float().mean().detach())
+    summary.set("train_active_ratio", train_active_mask.float().mean().detach())
+    summary.set(
+        "adaptive_ratio_platoon", effective_platoon_mask.float().mean().detach()
+    )
     summary.set(
         "adaptive_ratio_hinge_approach",
-        hinge_approach_mask.float().mean().detach(),
+        effective_hinge_approach_mask.float().mean().detach(),
     )
     for metric_key in (
         "entropy",
@@ -2222,12 +2346,28 @@ def train(cfg: DictConfig):
         normalize_advantage_exclude_dims=(-2,),
         reduction="none",
     )
+    agent_terminal_mask_enabled = bool(
+        cfg.loss.get("agent_terminal_mask_enabled", False)
+    )
     loss_module.set_keys(
         reward=env.reward_key,
         action=env.action_key,
-        done=("agents", "done"),
-        terminated=("agents", "terminated"),
+        done=(
+            ("agents", "done_train")
+            if agent_terminal_mask_enabled
+            else ("agents", "done")
+        ),
+        terminated=(
+            ("agents", "terminated_train")
+            if agent_terminal_mask_enabled
+            else ("agents", "terminated")
+        ),
     )
+    if agent_terminal_mask_enabled:
+        print(
+            "[PPO][agent-mask-init] Using agent-level training terminals for GAE/PPO: "
+            "done=('agents', 'done_train'), terminated=('agents', 'terminated_train')."
+        )
     loss_module.make_value_estimator(
         ValueEstimators.GAE, gamma=cfg.loss.gamma, lmbda=cfg.loss.lmbda
     )
@@ -2326,6 +2466,7 @@ def train(cfg: DictConfig):
 
     advantage_layout_logged = False
     minibatch_layout_logged = False
+    agent_mask_usage_logged = False
     sampling_start = time.time()
     pbar = tqdm(enumerate(collector, start=start_iteration), 
              initial=start_iteration,
@@ -2335,6 +2476,8 @@ def train(cfg: DictConfig):
     for i, tensordict_data in pbar:
         sampling_time = time.time() - sampling_start
         with torch.no_grad():
+            if agent_terminal_mask_enabled:
+                attach_agent_train_masks(tensordict_data)
             loss_module.value_estimator(
                 tensordict_data,
                 params=loss_module.critic_network_params,
@@ -2383,6 +2526,8 @@ def train(cfg: DictConfig):
                     )
                     log_advantage_layout("minibatch", subdata, loss_module, env.n_agents)
                     minibatch_layout_logged = True
+                if agent_terminal_mask_enabled:
+                    attach_agent_train_masks(subdata)
                 loss_vals = loss_module(subdata)
                 lipsnet_stats = (
                     lipsnet_actor_backbone.pop_regularization_stats()
@@ -2392,15 +2537,30 @@ def train(cfg: DictConfig):
                 platoon_mask, hinge_approach_mask = extract_training_phase_masks(
                     subdata
                 )
+                if agent_terminal_mask_enabled:
+                    train_active_mask = extract_agent_train_mask(subdata)
+                else:
+                    train_active_mask = torch.ones_like(platoon_mask)
                 active_phase_weights = (
                     phase_state["weights"] if phase_weight_controller.enabled else None
                 )
                 loss_value, training_summary = build_training_summary(
                     loss_vals,
+                    train_active_mask,
                     platoon_mask,
                     hinge_approach_mask,
                     active_phase_weights,
                 )
+                if agent_terminal_mask_enabled and not agent_mask_usage_logged:
+                    log_agent_train_mask_usage(
+                        "minibatch",
+                        subdata,
+                        loss_vals,
+                        train_active_mask,
+                        platoon_mask,
+                        hinge_approach_mask,
+                    )
+                    agent_mask_usage_logged = True
                 if lipsnet_stats is not None:
                     lipsnet_regularization = lipsnet_stats["regularization_loss"]
                     if lipsnet_regularization is not None:

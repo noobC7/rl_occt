@@ -1,0 +1,145 @@
+seed: 40
+
+env:
+  max_steps: None
+  eval_max_steps: 1500
+  scenario_name: "occt_scenario"
+  scenario:
+    target_road_id: 1
+    enable_obs_audit: False
+    viewer_zoom: 20.0
+    resolution_factor: 3
+    n_agents: 5
+    task_class: 1
+    is_rand_arc_pos: False
+    cargo_half_width: 2
+    threshold_near_other_agents_c2c_high: 6
+    max_speed: 8
+    init_vel_std: 1
+    still_space: 6
+    init_arc_pos: 0.0
+    use_center_frenet_ref: True
+    n_nearing_agents_observed: 2
+    use_history_observation: True
+    history_obs_len: 10
+    n_observed_steps: 10
+    n_stored_steps: 10
+    history_obs_dim: null
+    # reward weights
+    reward_progress: 5.0
+    reward_vel: 0
+    reward_goal: 0
+    reward_platoon_vel: 20
+    reward_platoon_space: 20
+    reward_platoon_ref: 50
+    reward_platoon_heading: 10
+
+    reward_all_hinge: 0
+    reward_hinge: 20000
+    reward_hinged_hold: 350
+    reward_hinge_vel: 20
+    reward_hinge_space: 20
+    reward_hinge_ref: 20
+    reward_approach_hinge: 50
+
+    penalty_goal_incomplete_hinge: -300
+    goal_incomplete_hinge_penalty_mode: constant
+    penalty_near_boundary: -200
+    penalty_near_other_agents: -200
+    penalty_change_steering: -1.0
+    penalty_change_acc: -0.001
+    penalty_collide_with_agents: -400
+    penalty_outside_boundaries: -400
+    penalty_hinge_time_cost: -80
+    penalty_backward: -400
+  device: ???
+  vmas_envs: 300
+
+model:
+  shared_parameters: True
+  centralised_critic: True
+  is_actor_retentive: True
+  is_critic_bi_head: False
+  actor:
+    depth: 2
+    num_cells: 96  # fusion MLP hidden size, tuned to match baseline actor params
+    fields:
+      include: null
+      exclude:
+        - self_hinge_status
+        - self_hinge_past_info
+    retentive:
+      branch_hidden: 48
+      lstm_hidden: 24
+
+      # 自车当前状态keys
+      self_keys:
+        - self_vel
+        - self_speed
+        - self_steering
+        - self_acc
+        - self_ref_velocity
+        - self_ref_points
+        - self_hinge_preview_info
+        - self_distance_to_ref
+        - self_left_boundary_distance
+        - self_right_boundary_distance
+        - self_distance_to_left_boundary
+        - self_distance_to_right_boundary
+        - self_platoon_error_vel
+        - self_hinge_error_vel
+        - self_platoon_error_space
+
+      # Hinge历史信息
+      hinge_key: self_hinge_past_info
+
+      # 他车历史信息（保留！编队需要）
+      other_keys:
+        - others_pos
+        - others_rot
+        - others_relative_longitudinal_velocity
+        - others_relative_acceleration
+        - others_distance
+
+  critic:
+    depth: 2
+    num_cells: 688
+    fields:
+      include: null
+      exclude:
+        - self_hinge_status
+
+collector:
+  frames_per_batch: 60_000
+  n_iters: 300  # 保持与baseline相同
+  total_frames: ???
+
+buffer:
+  memory_size: ???
+
+loss:
+  gamma: 0.99
+  lmbda: 0.95
+  entropy_eps: 0.05
+  clip_epsilon: 0.2
+
+train:
+  num_epochs: 45
+  minibatch_size: 4096
+  lr: 5e-5
+  max_grad_norm: 40.0  # 降低到1.0，LSTM训练更稳定
+  device: ???
+  resume_mode: null 
+  resume_from_checkpoint: null
+eval:
+  evaluation_interval: 10
+  evaluation_episodes: 6
+  render_batch_size: 6
+
+logger:
+  backend: swanlab
+  project_name: "MAPPO_OCCT_ROUNDABOUT_EXTEND"
+  group_name: "retentive_actor_lite"
+  description: "轻量级retentive actor - actor params tuned to match baseline level, 增加road4比例进行微调（只加载actor），提高了entropy_eps和clip_epsilon参数,道路除了环岛都是规则的，预计不让road4有太多奇怪的碰撞"
+  resume_swanlab_id: null
+  mode: cloud # cloud or local
