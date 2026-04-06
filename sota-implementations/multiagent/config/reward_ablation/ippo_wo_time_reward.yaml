@@ -34,7 +34,9 @@ env:
     reward_platoon_ref: 50
     reward_platoon_heading: 10
 
+    reward_all_hinge: 0
     reward_hinge: 20000
+    reward_hinged_hold: 350
     reward_hinge_vel: 20
     reward_hinge_space: 20
     reward_hinge_ref: 20
@@ -48,7 +50,7 @@ env:
     penalty_change_acc: -0.001
     penalty_collide_with_agents: -400
     penalty_outside_boundaries: -400
-    penalty_hinge_time_cost: -80
+    penalty_hinge_time_cost: 0
     penalty_backward: -400
   device: ???
   vmas_envs: 300
@@ -76,7 +78,7 @@ model:
 
 collector:
   frames_per_batch: 60_000
-  n_iters: 0
+  n_iters: 300
   total_frames: ???
 
 buffer:
@@ -95,8 +97,7 @@ train:
   max_grad_norm: 40.0
   device: ???
   resume_mode: resume # fine_tune, resume or warm_start
-  resume_from_checkpoint: /home/yons/Graduation/rl_occt/outputs/2026-04-03/07-32-46_mlp_ippo_train/checkpoints/checkpoint_iter_290_frames_17460000.pt
-  
+  resume_from_checkpoint: null
 eval:
   evaluation_interval: 10
   evaluation_episodes: 6
@@ -104,8 +105,8 @@ eval:
 
 logger:
   backend: swanlab
-  project_name: "MAPPO_OCCT_NORMAL_EXTEND"
-  group_name: "mlp_full_obse"
-  description: "ippo,道路除了环岛都是规则的，预计不让road4有太多奇怪的碰撞"
+  project_name: "MAPPO_OCCT_REWARD_ABLATION"
+  group_name: ""
+  description: "full_reward"
   resume_swanlab_id: null
-  mode: local # cloud or local
+  mode: cloud # cloud or local

@@ -1059,8 +1059,8 @@ if __name__ == "__main_chapter3_vis__":
     metrics_df = calculate_and_print_metrics(data, batch_idx=batch_idx,output_dir_abs=output_dir_abs,note=note)
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
-    rollout_file_path = "/home/yons/Graduation/rl_occt/outputs/2026-03-31/14-44-03/run-20260331_144422-ziwup9uwq8g3f249hceym/rollouts/rollout_iter_40_frames_2520000.pt"
-    batch_idx = 1
+    rollout_file_path = "/home/yons/Graduation/rl_occt/outputs/2026-04-03/17-48-30/run-20260403_174834-v19gbpp6xdsognx6jcr8a/rollouts/rollout_iter_80_frames_4860000.pt"
+    batch_idx = 0
     try:
         print(f"正在加载rollout文件: {rollout_file_path}")
         rollouts = load_rollout(rollout_file_path)
@@ -1083,7 +1083,7 @@ if __name__ == "__main__":
             summary_html_name = os.path.basename(summary_link_entry)
             
             # 启动本地HTTP服务器（--directory 指定根目录为输出目录）
-            port = 7801
+            port = 7700
             # 终止占用端口的进程（Windows用taskkill，Linux/Mac用fuser）
             if os.name == "nt":  # Windows系统
                 subprocess.run(

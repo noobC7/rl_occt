@@ -17,6 +17,16 @@ from plt_cn_utils import *
 
 DEFAULT_DT = 0.05
 DEFAULT_FOLLOWERS = [1, 2, 3]
+DEFAULT_SEDAN_MASS_KG = 1500.0
+DEFAULT_SEDAN_WIDTH_M = 1.5
+DEFAULT_SEDAN_HEIGHT_M = 1.45
+DEFAULT_DRAG_COEFF = 0.29
+DEFAULT_ROLLING_RESISTANCE = 0.01
+DEFAULT_AIR_DENSITY_KG_PER_M3 = 1.225
+DEFAULT_DRIVETRAIN_EFFICIENCY = 0.90
+DEFAULT_JERK_TIME_SCALE_SEC = 0.5
+DEFAULT_JERK_PENALTY_WEIGHT = 0.10
+GRAVITY_M_PER_S2 = 9.81
 DEFAULT_VALIDATION_RESULT_DIR = (
     Path(__file__).resolve().parents[3]
     / "VMAS_occt"
@@ -298,6 +308,118 @@ def _extract_episode_road_name(
     return _default_road_name(road_id)
 
 
+def _compute_episode_terminal_status(
+    episode: Dict[str, Any],
+    follower_ids: Optional[Sequence[int]] = None,
+) -> Dict[str, bool]:
+    info = episode["info"]
+    agent_hinge_status = _squeeze_trailing_unit_dim(info["agent_hinge_status"]).bool()
+    num_agents = int(agent_hinge_status.shape[1])
+
+    if follower_ids is None:
+        resolved_follower_ids = _filter_valid_agent_ids(DEFAULT_FOLLOWERS, num_agents)
+    else:
+        resolved_follower_ids = _filter_valid_agent_ids(follower_ids, num_agents)
+
+    final_agent_index = 0
+    final_collision_agents = bool(
+        _squeeze_trailing_unit_dim(info["done_collision_with_agents"])[
+            -1, final_agent_index
+        ].item()
+    )
+    final_collision_lanelets = bool(
+        _squeeze_trailing_unit_dim(info["done_collision_with_lanelets"])[
+            -1, final_agent_index
+        ].item()
+    )
+    final_collision_exit = bool(
+        _squeeze_trailing_unit_dim(info["done_collision_with_exit_segments"])[
+            -1, final_agent_index
+        ].item()
+    )
+    final_all_hinged = bool(
+        agent_hinge_status[-1, resolved_follower_ids].all().item()
+    )
+    final_success = (
+        final_collision_exit
+        and final_all_hinged
+        and not final_collision_agents
+        and not final_collision_lanelets
+    )
+    return {
+        "final_success": final_success,
+        "final_collision_agents": final_collision_agents,
+        "final_collision_lanelets": final_collision_lanelets,
+        "final_collision_exit": final_collision_exit,
+        "final_all_hinged": final_all_hinged,
+    }
+
+
+def _count_hinge_opportunity_successes(
+    hinge_status: torch.Tensor,
+    agent_hinge_status: torch.Tensor,
+) -> tuple[int, int]:
+    hinge_status = _squeeze_trailing_unit_dim(hinge_status).bool()
+    agent_hinge_status = _squeeze_trailing_unit_dim(agent_hinge_status).bool()
+    if hinge_status.shape != agent_hinge_status.shape:
+        raise ValueError(
+            "hinge_status and agent_hinge_status must share the same shape when "
+            "counting hinge opportunity successes: "
+            f"{tuple(hinge_status.shape)} vs {tuple(agent_hinge_status.shape)}"
+        )
+
+    success_count = 0
+    opportunity_count = 0
+    num_followers = int(hinge_status.shape[1])
+
+    for follower_idx in range(num_followers):
+        for _, _, success_index in _iter_hinge_opportunities(
+            hinge_status[:, follower_idx],
+            agent_hinge_status[:, follower_idx],
+        ):
+            opportunity_count += 1
+            if success_index is not None:
+                success_count += 1
+
+    return success_count, opportunity_count
+
+
+def _iter_hinge_opportunities(
+    hinge_status_series: torch.Tensor,
+    agent_hinged_series: torch.Tensor,
+):
+    hinge_status_series = _squeeze_trailing_unit_dim(hinge_status_series).bool()
+    agent_hinged_series = _squeeze_trailing_unit_dim(agent_hinged_series).bool()
+    if hinge_status_series.shape != agent_hinged_series.shape:
+        raise ValueError(
+            "hinge_status_series and agent_hinged_series must share the same shape "
+            f"when iterating hinge opportunities: {tuple(hinge_status_series.shape)} "
+            f"vs {tuple(agent_hinged_series.shape)}"
+        )
+
+    time_horizon = int(hinge_status_series.shape[0])
+    step = 0
+    while step < time_horizon:
+        if not bool(hinge_status_series[step].item()):
+            step += 1
+            continue
+        segment_start = step
+        while step + 1 < time_horizon and bool(hinge_status_series[step + 1].item()):
+            step += 1
+        segment_end = step
+        success_indices = torch.nonzero(
+            agent_hinged_series[segment_start : segment_end + 1],
+            as_tuple=True,
+        )[0]
+        success_index = (
+            segment_start + int(success_indices[0].item())
+            if len(success_indices) > 0
+            else None
+        )
+        yield segment_start, segment_end, success_index
+        step += 1
+
+
 def _build_result_bundle(
     *,
     method: str,
@@ -418,6 +540,99 @@ def _compute_signal_rate(signal: torch.Tensor, dt: float) -> torch.Tensor:
     return rate
 
 
+def _compute_positive_specific_energy_proxy(
+    speed_series: torch.Tensor,
+    acceleration_series: torch.Tensor,
+    dt: float,
+) -> float:
+    speed_series = torch.as_tensor(speed_series, dtype=torch.float32).reshape(-1)
+    acceleration_series = torch.as_tensor(
+        acceleration_series, dtype=torch.float32
+    ).reshape(-1)
+    if speed_series.numel() == 0 or acceleration_series.numel() == 0:
+        return 0.0
+    if speed_series.shape != acceleration_series.shape:
+        raise ValueError(
+            "speed_series and acceleration_series must have the same shape for "
+            "energy proxy computation: "
+            f"{tuple(speed_series.shape)} vs {tuple(acceleration_series.shape)}"
+        )
+    # Positive specific traction power proxy: max(v * a, 0), integrated over time.
+    # Unit: J/kg.
+    positive_specific_power = torch.clamp(speed_series * acceleration_series, min=0.0)
+    specific_energy_j_per_kg = positive_specific_power.sum() * max(dt, 1e-6)
+    return float(specific_energy_j_per_kg.item())
+
+
+def _compute_jerk_augmented_energy_proxy(
+    speed_series: torch.Tensor,
+    acceleration_series: torch.Tensor,
+    jerk_series: torch.Tensor,
+    dt: float,
+    *,
+    vehicle_mass_kg: float = DEFAULT_SEDAN_MASS_KG,
+    vehicle_width_m: float = DEFAULT_SEDAN_WIDTH_M,
+    vehicle_height_m: float = DEFAULT_SEDAN_HEIGHT_M,
+    drag_coeff: float = DEFAULT_DRAG_COEFF,
+    rolling_resistance_coeff: float = DEFAULT_ROLLING_RESISTANCE,
+    air_density_kg_per_m3: float = DEFAULT_AIR_DENSITY_KG_PER_M3,
+    drivetrain_efficiency: float = DEFAULT_DRIVETRAIN_EFFICIENCY,
+    jerk_time_scale_sec: float = DEFAULT_JERK_TIME_SCALE_SEC,
+    jerk_penalty_weight: float = DEFAULT_JERK_PENALTY_WEIGHT,
+) -> float:
+    speed_series = torch.as_tensor(speed_series, dtype=torch.float32).reshape(-1)
+    acceleration_series = torch.as_tensor(
+        acceleration_series, dtype=torch.float32
+    ).reshape(-1)
+    jerk_series = torch.as_tensor(jerk_series, dtype=torch.float32).reshape(-1)
+    if (
+        speed_series.numel() == 0
+        or acceleration_series.numel() == 0
+        or jerk_series.numel() == 0
+    ):
+        return 0.0
+    if not (
+        speed_series.shape == acceleration_series.shape == jerk_series.shape
+    ):
+        raise ValueError(
+            "speed_series, acceleration_series, and jerk_series must have the same "
+            "shape for jerk-augmented energy proxy computation: "
+            f"{tuple(speed_series.shape)}, {tuple(acceleration_series.shape)}, "
+            f"{tuple(jerk_series.shape)}"
+        )
+
+    speed_series = torch.clamp(speed_series, min=0.0)
+    frontal_area_m2 = vehicle_width_m * vehicle_height_m
+    positive_inertial_power = vehicle_mass_kg * torch.clamp(
+        acceleration_series, min=0.0
+    ) * speed_series
+    rolling_power = (
+        rolling_resistance_coeff * vehicle_mass_kg * GRAVITY_M_PER_S2 * speed_series
+    )
+    aerodynamic_power = (
+        0.5
+        * air_density_kg_per_m3
+        * drag_coeff
+        * frontal_area_m2
+        * speed_series**3
+    )
+    jerk_penalty_power = (
+        jerk_penalty_weight
+        * vehicle_mass_kg
+        * jerk_time_scale_sec
+        * torch.abs(jerk_series)
+        * speed_series
+    )
+    total_power = (
+        positive_inertial_power
+        + rolling_power
+        + aerodynamic_power
+        + jerk_penalty_power
+    ) / max(drivetrain_efficiency, 1e-6)
+    energy_wh = total_power.sum() * max(dt, 1e-6) / 3600.0
+    return float(energy_wh.item())
+
+
 def _compute_yaw_rate_from_rot(rot: torch.Tensor, dt: float) -> torch.Tensor:
     rot_series = torch.as_tensor(rot, dtype=torch.float32).reshape(-1)
     if rot_series.numel() == 0:
@@ -483,6 +698,14 @@ def compute_validation_metrics_from_object(
     hinge_speed_diffs = []
     hinge_pre_dock_vel_angle_diffs = []
     hinge_gate_angle_diffs = []
+    final_hinged_counts = []
+    final_hinged_ratios = []
+    agent_hinged_time_values = []
+    agent_hinged_time_ratio_values = []
+    energy_proxy_values = []
+    energy_proxy_jerk_values = []
+    energy_proxy_rate_values = []
+    energy_proxy_jerk_rate_values = []
 
     hinge_times_by_agent = {agent: [] for agent in resolved_followers}
     hinge_speed_diffs_by_agent = {agent: [] for agent in resolved_followers}
@@ -493,7 +716,9 @@ def compute_validation_metrics_from_object(
     collision_agents_flags = []
     collision_lanelets_flags = []
     collision_exit_flags = []
-    success_flags = []
+    terminal_success_flags = []
+    hinge_opportunity_success_count = 0
+    hinge_opportunity_total_count = 0
     road_ids = []
 
     episode_lengths = []
@@ -537,9 +762,45 @@ def compute_validation_metrics_from_object(
             if "hinge_gate_angle_diff_deg" in info
             else None
         )
+        hinged_steps_per_agent = agent_hinge_status.to(torch.float32).sum(dim=0)
+        episode_horizon = max(int(agent_hinge_status.shape[0]), 1)
+        agent_hinged_time_values.extend(
+            (hinged_steps_per_agent * resolved_dt).detach().cpu().tolist()
+        )
+        agent_hinged_time_ratio_values.extend(
+            (hinged_steps_per_agent / float(episode_horizon)).detach().cpu().tolist()
+        )
 
         for follower_idx, agent_id in enumerate(resolved_followers):
             active_control_mask = ~agent_hinge_status[:, follower_idx]
+            actual_acc_series = _compute_signal_rate(speed_all[:, agent_id], resolved_dt)
+            actual_jerk_series = _compute_signal_rate(actual_acc_series, resolved_dt)
+            if active_control_mask.any():
+                active_duration_sec = (
+                    float(active_control_mask.to(torch.float32).sum().item())
+                    * resolved_dt
+                )
+                energy_proxy_value = _compute_positive_specific_energy_proxy(
+                    speed_all[:, agent_id][active_control_mask],
+                    actual_acc_series[active_control_mask],
+                    resolved_dt,
+                )
+                energy_proxy_jerk_value = _compute_jerk_augmented_energy_proxy(
+                    speed_all[:, agent_id][active_control_mask],
+                    actual_acc_series[active_control_mask],
+                    actual_jerk_series[active_control_mask],
+                    resolved_dt,
+                )
+                energy_proxy_values.append(energy_proxy_value)
+                energy_proxy_jerk_values.append(energy_proxy_jerk_value)
+                if active_duration_sec > 0.0:
+                    energy_proxy_rate_values.append(
+                        energy_proxy_value / active_duration_sec
+                    )
+                    energy_proxy_jerk_rate_values.append(
+                        energy_proxy_jerk_value / active_duration_sec
+                    )
+
             if not active_control_mask.any():
                 continue
 
@@ -548,7 +809,7 @@ def compute_validation_metrics_from_object(
                     info["act_acc"][:, agent_id]
                 ).float().reshape(-1)
             else:
-                acc_series = _compute_signal_rate(speed_all[:, agent_id], resolved_dt)
+                acc_series = actual_acc_series
             jerk_series = _compute_signal_rate(acc_series, resolved_dt)
             if "steering_rate_abs_deg" in info:
                 steering_rate_abs_series = _squeeze_trailing_unit_dim(
@@ -639,93 +900,89 @@ def compute_validation_metrics_from_object(
                             .tolist()
                         )
 
-            first_hinge_index = torch.nonzero(
-                agent_hinge_status[:, follower_idx], as_tuple=True
-            )[0]
-            if len(first_hinge_index) == 0:
-                continue
+            for hinge_segment_start, _, success_index in _iter_hinge_opportunities(
+                hinge_status[:, follower_idx],
+                agent_hinge_status[:, follower_idx],
+            ):
+                if success_index is None:
+                    continue
 
-            first_hinge_index = int(first_hinge_index[0].item())
-            hinge_segment_start, hinge_segment_end = _latest_true_segment_until(
-                hinge_status[:, follower_idx], first_hinge_index
-            )
-            if hinge_segment_start is None or hinge_segment_end is None:
-                continue
-
-            metric_index = max(first_hinge_index - 1, 0)
-            hinge_time = float(
-                (hinge_segment_end - hinge_segment_start + 1) * resolved_dt
-            )
-            hinge_times.append(hinge_time)
-            hinge_times_by_agent[agent_id].append(hinge_time)
-
-            if hinge_vel is not None:
-                speed_diff = float(
-                    torch.abs(
-                        torch.linalg.norm(vel[metric_index, follower_idx])
-                        - torch.linalg.norm(hinge_vel[metric_index, follower_idx])
-                    ).item()
+                metric_index = max(success_index - 1, 0)
+                hinge_time = float(
+                    (success_index - hinge_segment_start + 1) * resolved_dt
                 )
-            elif error_vel is not None:
-                speed_diff = float(
-                    torch.abs(error_vel[metric_index, follower_idx, 0]).item()
-                )
-            else:
-                speed_diff = float("nan")
-            hinge_speed_diffs.append(speed_diff)
-            hinge_speed_diffs_by_agent[agent_id].append(speed_diff)
+                hinge_times.append(hinge_time)
+                hinge_times_by_agent[agent_id].append(hinge_time)
 
-            if hinge_vel is not None:
-                pre_dock_vel_angle_diff = _angle_diff_deg(
-                    rot[metric_index, follower_idx],
-                    hinge_vel[metric_index, follower_idx],
-                )
-                if pre_dock_vel_angle_diff is not None:
-                    hinge_pre_dock_vel_angle_diffs.append(pre_dock_vel_angle_diff)
-                    hinge_pre_dock_vel_angle_diffs_by_agent[agent_id].append(
-                        pre_dock_vel_angle_diff
+                if hinge_vel is not None:
+                    speed_diff = float(
+                        torch.abs(
+                            torch.linalg.norm(vel[metric_index, follower_idx])
+                            - torch.linalg.norm(hinge_vel[metric_index, follower_idx])
+                        ).item()
                     )
+                elif error_vel is not None:
+                    speed_diff = float(
+                        torch.abs(error_vel[metric_index, follower_idx, 0]).item()
+                    )
+                else:
+                    speed_diff = float("nan")
+                hinge_speed_diffs.append(speed_diff)
+                hinge_speed_diffs_by_agent[agent_id].append(speed_diff)
 
-            if hinge_gate_angle is not None:
-                gate_angle_diff = float(
-                    hinge_gate_angle[first_hinge_index, follower_idx].item()
-                )
-                hinge_gate_angle_diffs.append(gate_angle_diff)
-                hinge_gate_angle_diffs_by_agent[agent_id].append(gate_angle_diff)
+                if hinge_vel is not None:
+                    pre_dock_vel_angle_diff = _angle_diff_deg(
+                        rot[metric_index, follower_idx],
+                        hinge_vel[metric_index, follower_idx],
+                    )
+                    if pre_dock_vel_angle_diff is not None:
+                        hinge_pre_dock_vel_angle_diffs.append(pre_dock_vel_angle_diff)
+                        hinge_pre_dock_vel_angle_diffs_by_agent[agent_id].append(
+                            pre_dock_vel_angle_diff
+                        )
+
+                if hinge_gate_angle is not None:
+                    gate_angle_diff = float(
+                        hinge_gate_angle[success_index, follower_idx].item()
+                    )
+                    hinge_gate_angle_diffs.append(gate_angle_diff)
+                    hinge_gate_angle_diffs_by_agent[agent_id].append(gate_angle_diff)
 
         if episode_ttc_candidates:
             platoon_ttc_episode_mins.append(float(min(episode_ttc_candidates)))
 
-        final_agent_index = 0
-        final_success = bool(
-            _squeeze_trailing_unit_dim(info["episode_success"])[
-                -1, final_agent_index
-            ].item()
+        terminal_status = _compute_episode_terminal_status(
+            episode, follower_ids=resolved_followers
         )
-        final_collision_agents = bool(
-            _squeeze_trailing_unit_dim(info["done_collision_with_agents"])[
-                -1, final_agent_index
-            ].item()
-        )
-        final_collision_lanelets = bool(
-            _squeeze_trailing_unit_dim(info["done_collision_with_lanelets"])[
-                -1, final_agent_index
-            ].item()
-        )
-        final_collision_exit = bool(
-            _squeeze_trailing_unit_dim(info["done_collision_with_exit_segments"])[
-                -1, final_agent_index
-            ].item()
-        )
+        final_success = terminal_status["final_success"]
+        final_collision_agents = terminal_status["final_collision_agents"]
+        final_collision_lanelets = terminal_status["final_collision_lanelets"]
+        final_collision_exit = terminal_status["final_collision_exit"]
         final_collision_any = (
             final_collision_agents or final_collision_lanelets or final_collision_exit
         )
+        final_hinged_count = float(agent_hinge_status[-1].sum().item())
+        final_hinged_ratio = (
+            final_hinged_count / float(len(resolved_followers))
+            if len(resolved_followers) > 0
+            else float("nan")
+        )
+        episode_hinge_success_count, episode_hinge_opportunity_count = (
+            _count_hinge_opportunity_successes(
+                hinge_status,
+                agent_hinge_status,
+            )
+        )
 
-        success_flags.append(final_success)
+        terminal_success_flags.append(final_success)
         collision_flags.append(final_collision_any)
         collision_agents_flags.append(final_collision_agents)
         collision_lanelets_flags.append(final_collision_lanelets)
         collision_exit_flags.append(final_collision_exit)
+        final_hinged_counts.append(final_hinged_count)
+        final_hinged_ratios.append(final_hinged_ratio)
+        hinge_opportunity_success_count += episode_hinge_success_count
+        hinge_opportunity_total_count += episode_hinge_opportunity_count
         road_id = _extract_episode_road_id(
             episode,
             result_data.get("requested_road_id"),
@@ -798,8 +1055,33 @@ def compute_validation_metrics_from_object(
         "hinge_ang_diff_mean": _safe_mean(hinge_gate_angle_diffs),
         "hinge_ang_diff_std": _safe_std(hinge_gate_angle_diffs),
         "hinge_success_event_count": len(hinge_times),
+        "hinge_count_mean": _safe_mean(final_hinged_counts),
+        "hinge_count_std": _safe_std(final_hinged_counts),
+        "hinge_ratio_mean": _safe_mean(final_hinged_ratios),
+        "hinge_ratio_std": _safe_std(final_hinged_ratios),
+        "agent_hinged_time_mean": _safe_mean(agent_hinged_time_values),
+        "agent_hinged_time_std": _safe_std(agent_hinged_time_values),
+        "agent_hinged_time_ratio_mean": _safe_mean(agent_hinged_time_ratio_values),
+        "agent_hinged_time_ratio_std": _safe_std(agent_hinged_time_ratio_values),
+        "energy_proxy_mean": _safe_mean(energy_proxy_values),
+        "energy_proxy_std": _safe_std(energy_proxy_values),
+        "energy_proxy_jerk_mean": _safe_mean(energy_proxy_jerk_values),
+        "energy_proxy_jerk_std": _safe_std(energy_proxy_jerk_values),
+        "energy_proxy_rate_mean": _safe_mean(energy_proxy_rate_values),
+        "energy_proxy_rate_std": _safe_std(energy_proxy_rate_values),
+        "energy_proxy_jerk_rate_mean": _safe_mean(energy_proxy_jerk_rate_values),
+        "energy_proxy_jerk_rate_std": _safe_std(energy_proxy_jerk_rate_values),
         "success_rate": (
-            float(sum(success_flags) / total_episodes) if total_episodes > 0 else float("nan")
+            float(hinge_opportunity_success_count / hinge_opportunity_total_count)
+            if hinge_opportunity_total_count > 0
+            else float("nan")
+        ),
+        "success_event_count": hinge_opportunity_success_count,
+        "success_opportunity_count": hinge_opportunity_total_count,
+        "terminal_success_rate": (
+            float(sum(terminal_success_flags) / total_episodes)
+            if total_episodes > 0
+            else float("nan")
         ),
         "collision_rate": (
             float(sum(collision_flags) / total_episodes)
@@ -1309,13 +1591,16 @@ def print_metrics(label: str, metrics: Dict[str, object]) -> None:
         print(f"{key}: {value}")
 
 
-def _select_representative_episode(episodes: List[Dict[str, Any]]) -> Dict[str, Any]:
+def _select_representative_episode(
+    episodes: List[Dict[str, Any]],
+    follower_ids: Optional[Sequence[int]] = None,
+) -> Dict[str, Any]:
     successful_episodes = [
         episode
         for episode in episodes
-        if bool(
-            _squeeze_trailing_unit_dim(episode["info"]["episode_success"]).reshape(-1)[-1].item()
-        )
+        if _compute_episode_terminal_status(
+            episode, follower_ids=follower_ids
+        )["final_success"]
     ]
     if successful_episodes:
         return successful_episodes[0]
@@ -1415,6 +1700,27 @@ def _draw_fill_band(
         alpha=0.14,
         label=band_label,
     )
+
+
+def _masked_axis_reduce(
+    value_matrix: np.ndarray,
+    reducer,
+) -> np.ndarray:
+    masked_values = np.ma.masked_invalid(value_matrix)
+    reduced = reducer(masked_values, axis=1)
+    if isinstance(reduced, np.ma.MaskedArray):
+        return reduced.filled(np.nan)
+    return np.asarray(reduced, dtype=float)
+
+
+def _mask_metric_matrix_by_phase(
+    value_matrix: np.ndarray,
+    phase_mask: torch.Tensor,
+) -> np.ndarray:
+    masked_values = np.array(value_matrix, copy=True, dtype=float)
+    invalid_mask = ~torch.as_tensor(phase_mask, dtype=torch.bool).detach().cpu().numpy()
+    masked_values[invalid_mask] = np.nan
+    return masked_values
 
 
 def _infer_num_agents(episode: Dict[str, Any]) -> int:
@@ -1598,9 +1904,9 @@ def _plot_plot_method_metric_pdf(
         _draw_fill_band(
             ax,
             time_axis=time_axis,
-            center_values=np.mean(value_matrix, axis=1),
-            upper_values=np.max(value_matrix, axis=1),
-            lower_values=np.min(value_matrix, axis=1),
+            center_values=_masked_axis_reduce(value_matrix, np.ma.mean),
+            upper_values=_masked_axis_reduce(value_matrix, np.ma.max),
+            lower_values=_masked_axis_reduce(value_matrix, np.ma.min),
             color=fill_color,
             mean_label="车辆1-3均值",
             band_label="车辆1-3波动带",
@@ -1689,7 +1995,10 @@ def plot_representative_road_curves(
         )
 
     representative_episodes = {
-        road_id: _select_representative_episode(episodes_by_road[road_id])
+        road_id: _select_representative_episode(
+            episodes_by_road[road_id],
+            follower_ids=resolved_followers,
+        )
         for road_id in target_road_ids
     }
 
@@ -1707,6 +2016,11 @@ def plot_representative_road_curves(
             torch.arange(int(episode["num_steps"]), dtype=torch.float32) * resolved_dt
         ).numpy()
         style_suffix = "fill" if plot_method_fill_stype else "lines"
+        hinge_status_matrix = _squeeze_trailing_unit_dim(
+            episode["info"]["hinge_status"][:, error_agent_ids]
+        ).bool()
+        platoon_phase_mask = ~hinge_status_matrix
+        hinge_phase_mask = hinge_status_matrix.any(dim=1)
 
         longitudinal_values = (
             episode["info"]["error_space"][:, error_agent_ids, 0]
@@ -1714,6 +2028,10 @@ def plot_representative_road_curves(
             .detach()
             .cpu()
             .numpy()
+        )
+        longitudinal_values = _mask_metric_matrix_by_phase(
+            longitudinal_values,
+            platoon_phase_mask,
         )
         longitudinal_path = plot_dir / (
             f"longitudinal_error_{method}_road{road_id}_"
@@ -1730,12 +2048,19 @@ def plot_representative_road_curves(
                 output_path=longitudinal_path,
                 fill_style=plot_method_fill_stype,
                 fill_color="#9467bd",
+                background_mask=hinge_phase_mask.detach().cpu().numpy(),
+                background_dt=resolved_dt,
+                background_label="铰接阶段",
             )
         )
 
         lateral_values = _squeeze_trailing_unit_dim(
             episode["info"]["distance_ref"][:, error_agent_ids]
         ).float().detach().cpu().numpy()
+        lateral_values = _mask_metric_matrix_by_phase(
+            lateral_values,
+            platoon_phase_mask,
+        )
         lateral_path = plot_dir / (
             f"lateral_error_{method}_road{road_id}_"
             f"{_format_agent_suffix(error_agent_ids)}_{style_suffix}.pdf"
@@ -1751,6 +2076,9 @@ def plot_representative_road_curves(
                 output_path=lateral_path,
                 fill_style=plot_method_fill_stype,
                 fill_color="#8c564b",
+                background_mask=hinge_phase_mask.detach().cpu().numpy(),
+                background_dt=resolved_dt,
+                background_label="铰接阶段",
             )
         )
 
@@ -2071,42 +2399,38 @@ def _collect_method_distribution_stats(
                             .tolist()
                         )
 
-            first_hinge_index = torch.nonzero(
-                agent_hinge_status[:, follower_idx], as_tuple=True
-            )[0]
-            if len(first_hinge_index) == 0:
-                continue
+            for hinge_segment_start, _, success_index in _iter_hinge_opportunities(
+                hinge_status[:, follower_idx],
+                agent_hinge_status[:, follower_idx],
+            ):
+                if success_index is None:
+                    continue
 
-            first_hinge_index = int(first_hinge_index[0].item())
-            hinge_segment_start, hinge_segment_end = _latest_true_segment_until(
-                hinge_status[:, follower_idx], first_hinge_index
-            )
-            if hinge_segment_start is None or hinge_segment_end is None:
-                continue
+                metric_index = max(success_index - 1, 0)
+                hinge_times.append(
+                    float((success_index - hinge_segment_start + 1) * resolved_dt)
+                )
 
-            metric_index = max(first_hinge_index - 1, 0)
-            hinge_times.append(
-                float((hinge_segment_end - hinge_segment_start + 1) * resolved_dt)
-            )
-
-            if hinge_vel is not None:
-                hinge_speed_diffs.append(
-                    float(
-                        torch.abs(
-                            torch.linalg.norm(vel[metric_index, follower_idx])
-                            - torch.linalg.norm(hinge_vel[metric_index, follower_idx])
-                        ).item()
+                if hinge_vel is not None:
+                    hinge_speed_diffs.append(
+                        float(
+                            torch.abs(
+                                torch.linalg.norm(vel[metric_index, follower_idx])
+                                - torch.linalg.norm(
+                                    hinge_vel[metric_index, follower_idx]
+                                )
+                            ).item()
+                        )
                     )
-                )
-            elif error_vel is not None:
-                hinge_speed_diffs.append(
-                    float(torch.abs(error_vel[metric_index, follower_idx, 0]).item())
-                )
+                elif error_vel is not None:
+                    hinge_speed_diffs.append(
+                        float(torch.abs(error_vel[metric_index, follower_idx, 0]).item())
+                    )
 
-            if hinge_gate_angle is not None:
-                hinge_gate_angle_diffs.append(
-                    float(hinge_gate_angle[first_hinge_index, follower_idx].item())
-                )
+                if hinge_gate_angle is not None:
+                    hinge_gate_angle_diffs.append(
+                        float(hinge_gate_angle[success_index, follower_idx].item())
+                    )
 
         if episode_ttc_candidates:
             platoon_ttc_episode_mins.append(float(min(episode_ttc_candidates)))
@@ -2453,14 +2777,17 @@ def plot_method_transition_comparison(
                 f"Method '{method}' not found in loaded inputs. Available methods: "
                 f"{sorted(datasets_by_method.keys())}"
             )
-        _, episodes_by_road, _, _ = _prepare_method_episode_groups(
+        _, episodes_by_road, _, resolved_followers = _prepare_method_episode_groups(
             datasets_by_method[method],
             followers=None,
             dt=None,
         )
         if road_id not in episodes_by_road:
             raise ValueError(f"Method '{method}' does not contain road {road_id}.")
-        representative_episode = _select_representative_episode(episodes_by_road[road_id])
+        representative_episode = _select_representative_episode(
+            episodes_by_road[road_id],
+            follower_ids=resolved_followers,
+        )
         representative_episode = {
             **representative_episode,
             "dt": float(datasets_by_method[method][0].get("dt", DEFAULT_DT)),

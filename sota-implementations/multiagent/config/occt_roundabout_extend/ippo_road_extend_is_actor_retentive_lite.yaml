@@ -20,7 +20,7 @@ env:
     init_arc_pos: 0.0
     use_center_frenet_ref: True
     n_nearing_agents_observed: 2
-    use_history_observation: False
+    use_history_observation: True
     history_obs_len: 10
     n_observed_steps: 10
     n_stored_steps: 10
@@ -34,7 +34,9 @@ env:
     reward_platoon_ref: 50
     reward_platoon_heading: 10
 
+    reward_all_hinge: 0
     reward_hinge: 20000
+    reward_hinged_hold: 350
     reward_hinge_vel: 20
     reward_hinge_space: 20
     reward_hinge_ref: 20
@@ -56,16 +58,49 @@ env:
 model:
   shared_parameters: True
   centralised_critic: False
-  is_actor_retentive: False
+  is_actor_retentive: True
   is_critic_bi_head: False
   actor:
     depth: 2
-    num_cells: 192
+    num_cells: 96  # fusion MLP hidden size, tuned to match baseline actor params
     fields:
       include: null
       exclude:
         - self_hinge_status
         - self_hinge_past_info
+    retentive:
+      branch_hidden: 48
+      lstm_hidden: 24
+
+      # 自车当前状态keys
+      self_keys:
+        - self_vel
+        - self_speed
+        - self_steering
+        - self_acc
+        - self_ref_velocity
+        - self_ref_points
+        - self_hinge_preview_info
+        - self_distance_to_ref
+        - self_left_boundary_distance
+        - self_right_boundary_distance
+        - self_distance_to_left_boundary
+        - self_distance_to_right_boundary
+        - self_platoon_error_vel
+        - self_hinge_error_vel
+        - self_platoon_error_space
+
+      # Hinge历史信息
+      hinge_key: self_hinge_past_info
+
+      # 他车历史信息（保留！编队需要）
+      other_keys:
+        - others_pos
+        - others_rot
+        - others_relative_longitudinal_velocity
+        - others_relative_acceleration
+        - others_distance
+
   critic:
     depth: 2
     num_cells: 688
@@ -76,7 +111,7 @@ model:
 
 collector:
   frames_per_batch: 60_000
-  n_iters: 0
+  n_iters: 0  # 保持与baseline相同
   total_frames: ???
 
 buffer:
@@ -92,11 +127,10 @@ train:
   num_epochs: 45
   minibatch_size: 4096
   lr: 5e-5
-  max_grad_norm: 40.0
+  max_grad_norm: 40.0  # 降低到1.0，LSTM训练更稳定
   device: ???
-  resume_mode: resume # fine_tune, resume or warm_start
-  resume_from_checkpoint: /home/yons/Graduation/rl_occt/outputs/2026-04-03/07-32-46_mlp_ippo_train/checkpoints/checkpoint_iter_290_frames_17460000.pt
-  
+  resume_mode: resume 
+  resume_from_checkpoint: /home/yons/Graduation/rl_occt/outputs/2026-04-04/05-59-58_i_retentive_actor_train/checkpoints/checkpoint_iter_299_frames_18000000.pt
 eval:
   evaluation_interval: 10
   evaluation_episodes: 6
@@ -104,8 +138,8 @@ eval:
 
 logger:
   backend: swanlab
-  project_name: "MAPPO_OCCT_NORMAL_EXTEND"
-  group_name: "mlp_full_obse"
-  description: "ippo,道路除了环岛都是规则的，预计不让road4有太多奇怪的碰撞"
+  project_name: "MAPPO_OCCT_ROUNDABOUT_EXTEND"
+  group_name: "retentive_actor_lite"
+  description: "轻量级retentive actor"
   resume_swanlab_id: null
   mode: local # cloud or local

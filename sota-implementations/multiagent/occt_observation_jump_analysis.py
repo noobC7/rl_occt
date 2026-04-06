@@ -24,9 +24,19 @@ DEFAULT_ROLLOUT_PATH = Path(
 DEFAULT_OUTPUT_DIR = Path.cwd() / "observation_jump_reports"
 
 
+def _unwrap_hydra_value_dict(value: Any) -> Any:
+    if isinstance(value, dict):
+        if "value" in value and set(value.keys()).issubset({"desc", "sort", "value"}):
+            return _unwrap_hydra_value_dict(value["value"])
+        return {key: _unwrap_hydra_value_dict(item) for key, item in value.items()}
+    if isinstance(value, list):
+        return [_unwrap_hydra_value_dict(item) for item in value]
+    return value
+
+
 def _load_yaml(path: Path) -> dict[str, Any]:
     with path.open("r", encoding="utf-8") as fp:
-        return yaml.safe_load(fp)
+        return _unwrap_hydra_value_dict(yaml.safe_load(fp))
 
 
 def _build_flat_observation_layout(cfg: dict[str, Any]) -> list[dict[str, Any]]:
@@ -132,6 +142,18 @@ def _safe_quantile(values: torch.Tensor, q: float) -> float:
     return _tensor_to_float(torch.quantile(values, q))
 
 
+def _safe_var(values: torch.Tensor) -> float:
+    if values.numel() == 0:
+        return float("nan")
+    return _tensor_to_float(values.var(unbiased=False))
+
+
+def _safe_std(values: torch.Tensor) -> float:
+    if values.numel() == 0:
+        return float("nan")
+    return _tensor_to_float(values.std(unbiased=False))
+
+
 def analyze_rollout(
     rollout_path: Path,
     layout: list[dict[str, Any]],
@@ -154,8 +176,10 @@ def analyze_rollout(
         name = layout_item["name"]
         group_dim = layout_item["dim"]
         abs_deltas = []
+        signed_deltas = []
         max_events = []
         steer_aligned_deltas = []
+        per_step_group_max_values = []
 
         for episode_index, traj in enumerate(trajectories):
             valid_len = get_valid_length(traj)
@@ -193,10 +217,13 @@ def analyze_rollout(
             abs_obs_delta = obs_delta.abs()
 
             for agent_id in resolved_agent_ids:
+                signed_agent_delta = obs_delta[:, agent_id].reshape(valid_len, -1)
                 agent_delta = abs_obs_delta[:, agent_id].reshape(valid_len, -1)
+                signed_deltas.append(signed_agent_delta.reshape(-1))
                 abs_deltas.append(agent_delta.reshape(-1))
 
                 per_step_group_max = agent_delta.max(dim=-1).values
+                per_step_group_max_values.append(per_step_group_max)
                 steer_group_pair = torch.stack(
                     (steer_delta_abs[:, agent_id], per_step_group_max), dim=-1
                 )
@@ -228,13 +255,19 @@ def analyze_rollout(
             continue
 
         stacked_abs_delta = torch.cat(abs_deltas)
+        stacked_signed_delta = torch.cat(signed_deltas)
         steer_alignment = torch.cat(steer_aligned_deltas, dim=0)
+        stacked_step_max_delta = torch.cat(per_step_group_max_values)
         summary_rows.append(
             {
                 "group_name": name,
                 "group_dim": group_dim,
                 "slice_start": ",".join(str(start) for start, _ in layout_item["segments"]),
                 "slice_end": ",".join(str(end) for _, end in layout_item["segments"]),
+                "delta_std": _safe_std(stacked_signed_delta),
+                "delta_variance": _safe_var(stacked_signed_delta),
+                "abs_delta_std": _safe_std(stacked_abs_delta),
+                "abs_delta_variance": _safe_var(stacked_abs_delta),
                 "max_abs_delta": _tensor_to_float(stacked_abs_delta.max()),
                 "mean_abs_delta": _tensor_to_float(stacked_abs_delta.mean()),
                 "p95_abs_delta": _safe_quantile(stacked_abs_delta, 0.95),
@@ -242,6 +275,8 @@ def analyze_rollout(
                 "mean_step_max_abs_delta": _tensor_to_float(
                     steer_alignment[:, 1].mean()
                 ),
+                "step_max_abs_delta_std": _safe_std(stacked_step_max_delta),
+                "step_max_abs_delta_variance": _safe_var(stacked_step_max_delta),
                 "max_step_max_abs_delta": _tensor_to_float(steer_alignment[:, 1].max()),
                 "mean_abs_delta_at_steer_jump": _tensor_to_float(
                     steer_alignment[steer_alignment[:, 0] > 0.05, 1].mean()

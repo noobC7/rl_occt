@@ -111,7 +111,7 @@ model:
 
 collector:
   frames_per_batch: 60_000
-  n_iters: 300  # 保持与baseline相同
+  n_iters: 0  # 保持与baseline相同
   total_frames: ???
 
 buffer:
@@ -129,8 +129,8 @@ train:
   lr: 5e-5
   max_grad_norm: 40.0  # 降低到1.0，LSTM训练更稳定
   device: ???
-  resume_mode: null 
-  resume_from_checkpoint: null
+  resume_mode: resume 
+  resume_from_checkpoint: /home/yons/Graduation/rl_occt/outputs/2026-04-04/01-17-43_retentive_actor_train/checkpoints/checkpoint_iter_299_frames_18000000.pt
 eval:
   evaluation_interval: 10
   evaluation_episodes: 6
@@ -140,6 +140,6 @@ logger:
   backend: swanlab
   project_name: "MAPPO_OCCT_ROUNDABOUT_EXTEND"
   group_name: "retentive_actor_lite"
-  description: "轻量级retentive actor - actor params tuned to match baseline level, 增加road4比例进行微调（只加载actor），提高了entropy_eps和clip_epsilon参数,道路除了环岛都是规则的，预计不让road4有太多奇怪的碰撞"
+  description: "轻量级retentive actor"
   resume_swanlab_id: null
-  mode: cloud # cloud or local
+  mode: local # cloud or local

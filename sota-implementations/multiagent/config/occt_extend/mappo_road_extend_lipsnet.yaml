@@ -20,7 +20,7 @@ env:
     init_arc_pos: 0.0
     use_center_frenet_ref: True
     n_nearing_agents_observed: 2
-    use_history_observation: False
+    use_history_observation: True
     history_obs_len: 10
     n_observed_steps: 10
     n_stored_steps: 10
@@ -82,7 +82,7 @@ model:
 
 collector:
   frames_per_batch: 60_000
-  n_iters: 300
+  n_iters: 0
   total_frames: ???
 
 buffer:
@@ -101,7 +101,7 @@ train:
   max_grad_norm: 40.0
   device: ???
   resume_mode: resume # fine_tune, resume or warm_start
-  resume_from_checkpoint: null
+  resume_from_checkpoint: /home/yons/Graduation/rl_occt/outputs/2026-04-03/23-39-44_lipsnet_train/checkpoints/checkpoint_iter_299_frames_18000000.pt
 
 eval:
   evaluation_interval: 10
@@ -114,4 +114,4 @@ logger:
   group_name: "mlp_full_obse"
   description: "baseline,道路除了环岛都是规则的，预计不让road4有太多奇怪的碰撞"
   resume_swanlab_id: null
-  mode: cloud # cloud or local
+  mode: local # cloud or local

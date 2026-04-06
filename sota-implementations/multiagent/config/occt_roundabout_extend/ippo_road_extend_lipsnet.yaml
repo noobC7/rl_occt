@@ -20,7 +20,7 @@ env:
     init_arc_pos: 0.0
     use_center_frenet_ref: True
     n_nearing_agents_observed: 2
-    use_history_observation: False
+    use_history_observation: True
     history_obs_len: 10
     n_observed_steps: 10
     n_stored_steps: 10
@@ -34,7 +34,9 @@ env:
     reward_platoon_ref: 50
     reward_platoon_heading: 10
 
+    reward_all_hinge: 0
     reward_hinge: 20000
+    reward_hinged_hold: 350
     reward_hinge_vel: 20
     reward_hinge_space: 20
     reward_hinge_ref: 20
@@ -57,7 +59,13 @@ model:
   shared_parameters: True
   centralised_critic: False
   is_actor_retentive: False
+  use_lipsnet_actor: True
   is_critic_bi_head: False
+  lipsnet_lambda_t: 5e-4
+  lipsnet_lambda_k: 2e-3
+  lipsnet_kernel_scale: 0.02
+  lipsnet_norm_layer_type: none
+  lipsnet_jacobian_samples: 256
   actor:
     depth: 2
     num_cells: 192
@@ -95,8 +103,7 @@ train:
   max_grad_norm: 40.0
   device: ???
   resume_mode: resume # fine_tune, resume or warm_start
-  resume_from_checkpoint: /home/yons/Graduation/rl_occt/outputs/2026-04-03/07-32-46_mlp_ippo_train/checkpoints/checkpoint_iter_290_frames_17460000.pt
-  
+  resume_from_checkpoint: /home/yons/Graduation/rl_occt/outputs/2026-04-04/13-14-58_i_lipsnet_train/checkpoints/checkpoint_iter_299_frames_18000000.pt
 eval:
   evaluation_interval: 10
   evaluation_episodes: 6
@@ -104,8 +111,8 @@ eval:
 
 logger:
   backend: swanlab
-  project_name: "MAPPO_OCCT_NORMAL_EXTEND"
-  group_name: "mlp_full_obse"
-  description: "ippo,道路除了环岛都是规则的，预计不让road4有太多奇怪的碰撞"
+  project_name: "MAPPO_OCCT_ROUNDABOUT_EXTEND"
+  group_name: "lipsnet"
+  description: "lipsnet"
   resume_swanlab_id: null
   mode: local # cloud or local

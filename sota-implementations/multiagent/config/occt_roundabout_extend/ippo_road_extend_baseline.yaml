@@ -78,7 +78,7 @@ model:
 
 collector:
   frames_per_batch: 60_000
-  n_iters: 300
+  n_iters: 0
   total_frames: ???
 
 buffer:
@@ -97,7 +97,7 @@ train:
   max_grad_norm: 40.0
   device: ???
   resume_mode: resume # fine_tune, resume or warm_start
-  resume_from_checkpoint: null
+  resume_from_checkpoint: /home/yons/Graduation/rl_occt/outputs/2026-04-04/19-14-19_mlp_ippo_train/checkpoints/checkpoint_iter_299_frames_18000000.pt
 eval:
   evaluation_interval: 10
   evaluation_episodes: 6
@@ -109,4 +109,4 @@ logger:
   group_name: "mlp_full_obse_ippo"
   description: "ippo,道路除了环岛都是规则的，预计不让road4有太多奇怪的碰撞"
   resume_swanlab_id: null
-  mode: cloud # cloud or local
+  mode: local # cloud or local
