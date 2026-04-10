@@ -340,24 +340,38 @@ def _compute_episode_terminal_status(
     final_all_hinged = bool(
         agent_hinge_status[-1, resolved_follower_ids].all().item()
     )
+    # Reaching exit after all followers are hinged is treated as successful
+    # completion instead of a collision.
+    effective_collision_exit = final_collision_exit and not final_all_hinged
     final_success = (
-        final_collision_exit
-        and final_all_hinged
+        final_all_hinged
         and not final_collision_agents
         and not final_collision_lanelets
+        and not effective_collision_exit
     )
     return {
         "final_success": final_success,
         "final_collision_agents": final_collision_agents,
         "final_collision_lanelets": final_collision_lanelets,
-        "final_collision_exit": final_collision_exit,
+        "final_collision_exit": effective_collision_exit,
         "final_all_hinged": final_all_hinged,
     }
+
+
+def _expected_hinge_opportunities_per_follower(
+    road_id: Optional[int], follower_idx: int
+) -> int:
+    if road_id in {0, 1}:
+        return 2
+    if road_id == 2 and follower_idx in {1, 2}:
+        return 2
+    return 1
 
 
 def _count_hinge_opportunity_successes(
     hinge_status: torch.Tensor,
     agent_hinge_status: torch.Tensor,
+    road_id: Optional[int],
 ) -> tuple[int, int]:
     hinge_status = _squeeze_trailing_unit_dim(hinge_status).bool()
     agent_hinge_status = _squeeze_trailing_unit_dim(agent_hinge_status).bool()
@@ -373,13 +387,22 @@ def _count_hinge_opportunity_successes(
     num_followers = int(hinge_status.shape[1])
 
     for follower_idx in range(num_followers):
-        for _, _, success_index in _iter_hinge_opportunities(
-            hinge_status[:, follower_idx],
-            agent_hinge_status[:, follower_idx],
-        ):
-            opportunity_count += 1
-            if success_index is not None:
-                success_count += 1
+        expected_per_follower = _expected_hinge_opportunities_per_follower(
+            road_id, follower_idx
+        )
+        opportunity_count += expected_per_follower
+        follower_hinge_status = hinge_status[:, follower_idx]
+        follower_agent_hinged = agent_hinge_status[:, follower_idx]
+
+        hinged_transition = follower_agent_hinged.clone()
+        if hinged_transition.numel() > 1:
+            hinged_transition[1:] = (
+                follower_agent_hinged[1:] & ~follower_agent_hinged[:-1]
+            )
+        transition_success_count = int(
+            (hinged_transition & follower_hinge_status).sum().item()
+        )
+        success_count += min(transition_success_count, expected_per_follower)
 
     return success_count, opportunity_count
 
@@ -967,10 +990,15 @@ def compute_validation_metrics_from_object(
             if len(resolved_followers) > 0
             else float("nan")
         )
+        road_id = _extract_episode_road_id(
+            episode,
+            result_data.get("requested_road_id"),
+        )
         episode_hinge_success_count, episode_hinge_opportunity_count = (
             _count_hinge_opportunity_successes(
                 hinge_status,
                 agent_hinge_status,
+                road_id,
             )
         )
 
@@ -983,10 +1011,6 @@ def compute_validation_metrics_from_object(
         final_hinged_ratios.append(final_hinged_ratio)
         hinge_opportunity_success_count += episode_hinge_success_count
         hinge_opportunity_total_count += episode_hinge_opportunity_count
-        road_id = _extract_episode_road_id(
-            episode,
-            result_data.get("requested_road_id"),
-        )
         if road_id is not None:
             road_ids.append(road_id)
 

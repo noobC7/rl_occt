@@ -28,6 +28,7 @@ from torchrl.modules.models.multiagent import (
     PhaseConditionedMultiAgentMLP,
 )
 from torchrl.objectives import ClipPPOLoss, ValueEstimators
+from failure_curriculum import FailureCurriculumBank
 from utils.logging import init_logging, log_evaluation, log_training, log_batch_video
 from utils.utils import DoneTransform, save_checkpoint, save_rollout, load_checkpoint
 AGENT_FOCUS_INDEX=2
@@ -50,6 +51,61 @@ def build_eval_env(cfg_test: DictConfig, num_envs: int) -> VmasEnv:
         seed=cfg_test.seed,
         **cfg_test.env.scenario,
     )
+
+
+def _get_vmas_scenario(env) -> object | None:
+    current = env
+    visited = set()
+    while current is not None and id(current) not in visited:
+        visited.add(id(current))
+        scenario = getattr(current, "scenario", None)
+        if scenario is not None:
+            return scenario
+        current = (
+            getattr(current, "base_env", None)
+            or getattr(current, "_env", None)
+            or getattr(current, "env", None)
+        )
+    return None
+
+
+def configure_failure_curriculum(
+    env,
+    bank: FailureCurriculumBank | None,
+    iteration: int,
+    *,
+    force_disable: bool = False,
+) -> dict[str, float]:
+    scenario = _get_vmas_scenario(env)
+    if scenario is None or not hasattr(scenario, "configure_failure_curriculum"):
+        return {}
+    if force_disable or bank is None:
+        scenario.configure_failure_curriculum(
+            bank=None,
+            collect_enabled=False,
+            enabled=False,
+            replay_probability=0.0,
+            min_bank_size=0,
+            iteration=iteration,
+        )
+        return {}
+    replay_probability = bank.get_replay_probability(iteration)
+    scenario.configure_failure_curriculum(
+        bank=bank,
+        collect_enabled=bank.enabled and bank.is_failure_replay_mode,
+        enabled=bank.replay_enabled(iteration),
+        replay_probability=replay_probability,
+        min_bank_size=bank.min_bank_size,
+        iteration=iteration,
+    )
+    return bank.metrics(iteration)
+
+
+def drain_failure_curriculum_events(env) -> list[dict]:
+    scenario = _get_vmas_scenario(env)
+    if scenario is None or not hasattr(scenario, "drain_failure_curriculum_events"):
+        return []
+    return scenario.drain_failure_curriculum_events()
 
 
 def _safe_get(td, key):
@@ -2009,9 +2065,14 @@ def train(cfg: DictConfig):
         env,
         RewardSum(in_keys=[env.reward_key], out_keys=[("agents", "episode_reward")]),
     )
+    failure_curriculum_bank = FailureCurriculumBank(cfg)
+    failure_curriculum_metrics = configure_failure_curriculum(
+        env, failure_curriculum_bank, start_iteration
+    )
     cfg_test = cfg.copy()
     cfg_test.env.scenario.is_rand_arc_pos = False
     cfg_test.env.scenario.init_vel_std = 0
+    cfg_test.env.scenario.enable_failure_replay_restore = False
     env_test = None
 
     share_params = bool(cfg.model.shared_parameters)
@@ -2392,6 +2453,11 @@ def train(cfg: DictConfig):
             f"Checkpoint path {resume_from_checkpoint} does not exist. "
             "Training from scratch."
         )
+    failure_curriculum_metrics = configure_failure_curriculum(
+        env,
+        failure_curriculum_bank,
+        start_iteration,
+    )
     # Logging
     if cfg.logger.backend:
         if is_actor_retentive and is_critic_bi_head:
@@ -2442,6 +2508,12 @@ def train(cfg: DictConfig):
                 range(chunk_start, min(chunk_start + render_batch_size, total_eval_paths))
             )
             env_test = build_eval_env(cfg_test, len(path_ids))
+            configure_failure_curriculum(
+                env_test,
+                bank=None,
+                iteration=start_iteration,
+                force_disable=True,
+            )
             configure_eval_env_paths(env_test, path_ids)
             try:
                 run_eval_export_chunk(
@@ -2463,6 +2535,12 @@ def train(cfg: DictConfig):
         return
 
     env_test = build_eval_env(cfg_test, cfg_test.eval.evaluation_episodes)
+    configure_failure_curriculum(
+        env_test,
+        bank=None,
+        iteration=start_iteration,
+        force_disable=True,
+    )
 
     advantage_layout_logged = False
     minibatch_layout_logged = False
@@ -2498,9 +2576,13 @@ def train(cfg: DictConfig):
                 )
             advantage_layout_logged = True
         phase_state = phase_weight_controller.collector_state(tensordict_data)
-        iteration_extra_metrics = (
-            phase_state["metrics"] if phase_weight_controller.enabled else None
-        )
+        failure_events = drain_failure_curriculum_events(env)
+        for failure_event in failure_events:
+            failure_curriculum_bank.resolve_event(failure_event, i)
+        failure_curriculum_metrics = failure_curriculum_bank.metrics(i)
+        iteration_extra_metrics = dict(failure_curriculum_metrics)
+        if phase_weight_controller.enabled:
+            iteration_extra_metrics.update(phase_state["metrics"])
         current_frames = tensordict_data.numel()
         total_frames += current_frames
         data_view = tensordict_data.reshape(-1)
@@ -2660,6 +2742,11 @@ def train(cfg: DictConfig):
                 save_checkpoint(logger, policy, value_module, optim, i, total_frames)
                 save_rollout(logger, rollouts, i, total_frames)
 
+        configure_failure_curriculum(
+            env,
+            failure_curriculum_bank,
+            i + 1,
+        )
         sampling_start = time.time()
     collector.shutdown()
     if not env.is_closed:
