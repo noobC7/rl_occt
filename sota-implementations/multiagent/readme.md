@@ -38,4 +38,11 @@ join exist tables and compare:
 /home/yons/Graduation/pyquaticus/env-full/bin/python \
 /home/yons/Graduation/rl_occt/sota-implementations/multiagent/occt_metrics_evaluation.py \
 --data-dir outputs/occt_comparision/extend_roundabout \
---compare-methods mappo_mlp ippo_mlp mappo_retentive_actor mappo_lipsnet ippo_retentive_actor ippo_lipsnet
+--compare-methods mappo_mlp ippo_mlp mappo_retentive_actor mappo_lipsnet ippo_retentive_actor ippo_lipsnet ippo_failure_curriculum_eval
+
+
+/home/yons/Graduation/pyquaticus/env-full/bin/python \
+/home/yons/Graduation/rl_occt/sota-implementations/multiagent/occt_metrics_evaluation.py \
+--data-dir outputs/platoon_comparison_0411 \
+--representative-roads 0 \
+--plot-method-fill-stype false

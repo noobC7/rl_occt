@@ -69,7 +69,7 @@ model:
 
 collector:
   frames_per_batch: 60_000
-  n_iters: 100
+  n_iters: 0
   total_frames: ???
 
 buffer:
@@ -88,7 +88,7 @@ train:
   max_grad_norm: 40.0
   device: ???
   resume_mode: resume # fine_tune, resume or warm_start
-  resume_from_checkpoint: null
+  resume_from_checkpoint: /home/yons/Graduation/rl_occt/outputs/2026-04-11/21-55-13_platoon_mappo_train/checkpoints/checkpoint_iter_100_frames_6060000.pt
 eval:
   evaluation_interval: 10
   evaluation_episodes: 2
@@ -100,4 +100,4 @@ logger:
   group_name: "mappo_mlp_baseline"
   description: "mappo_mlp_baseline"
   resume_swanlab_id: null
-  mode: cloud # cloud or local
+  mode: local # cloud or local

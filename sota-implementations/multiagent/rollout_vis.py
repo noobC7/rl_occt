@@ -637,56 +637,67 @@ import numpy as np
 import matplotlib
 
 # --- 论文绘图通用设置 ---
-def set_pub_style():
-    # 尝试设置字体，如果没有 Times New Roman 则回退到默认
-    try:
-        plt.rcParams['font.family'] = 'Times New Roman'
-    except:
-        pass
-    plt.rcParams['font.size'] = 12
-    plt.rcParams['axes.labelsize'] = 14
-    plt.rcParams['axes.titlesize'] = 14
-    plt.rcParams['legend.fontsize'] = 10
-    plt.rcParams['xtick.labelsize'] = 12
-    plt.rcParams['ytick.labelsize'] = 12
-    plt.rcParams['lines.linewidth'] = 2.0
-    plt.rcParams['axes.grid'] = True
-    plt.rcParams['grid.alpha'] = 0.3
-    # 使用这种颜色循环，区分度高
-    plt.rcParams['axes.prop_cycle'] = matplotlib.cycler(color=['#d62728', '#1f77b4', '#2ca02c', '#ff7f0e', '#9467bd'])
 import matplotlib.pyplot as plt
 import numpy as np
 import matplotlib
 import matplotlib.font_manager as fm
 import os
-import pickle
-def calc_arc_length(pos_data):
-    """
-    计算累计弧长
-    pos_data: [time, agent, 2]
-    return: [time, agent]
-    """
-    # 计算相邻时刻的欧氏距离
-    delta = pos_data[1:] - pos_data[:-1]
-    dist = np.linalg.norm(delta, axis=-1)
-    # 累加得到弧长
-    arc_len = np.cumsum(dist, axis=0)
-    # 补上 t=0 时刻的 0
-    arc_len = np.vstack([np.zeros((1, arc_len.shape[1])), arc_len])
-    return arc_len
-# ===================== 中文论文绘图样式配置 =====================
+from matplotlib.ticker import FuncFormatter, MultipleLocator
+
+PAPER_PLOT_PALETTES = {
+    "speed": [
+        "#1C86A9",
+        "#48B3D8",
+        "#78CDEA",
+        "#C1E6F6",
+        "#C2D4D8",
+        "#ACE0DB",
+        "#D0CECE",
+    ],
+    "spacing": [
+        "#9EE221",
+        "#1ECE1E",
+        "#ACE0DB",
+        "#E8F3B4",
+        "#FDDA66",
+        "#EBE4D4",
+    ],
+    "acceleration": [
+        "#FDA871",
+        "#FEC5A8",
+        "#F8CBAC",
+        "#FFACAC",
+        "#FFA1A1",
+        "#FCE1CE",
+    ],
+    "steering": [
+        "#D391FF",
+        "#D393AB",
+        "#E0A4BD",
+        "#E3CDF3",
+        "#E2D4EB",
+        "#F4C8DD",
+    ],
+}
+PAPER_REFERENCE_COLOR = "#C2D4D8"
+PAPER_AUXILIARY_COLOR = "#D0CECE"
+
+
 def set_pub_style():
     # 指定宋体字体文件路径
     font_path = '/usr/share/fonts/truetype/msttcorefonts/SongTi.ttf'
     # 定义中文字体属性
-    font_prop_chinese = fm.FontProperties(fname=font_path, size=10) 
+    if os.path.exists(font_path):
+        font_prop_chinese = fm.FontProperties(fname=font_path, size=10)
+    else:
+        font_prop_chinese = fm.FontProperties(size=10)
     
     # 字体大小配置（适配单张小图）
     font_sizes = {
-        'label': 10,     # 坐标轴标签
-        'tick': 8,       # 刻度
-        'legend': 8,     # 图例
-        'title': 10      # 底部标题
+        'label': 12,     # 坐标轴标签
+        'tick': 11,       # 刻度
+        'legend': 11,     # 图例
+        'title': 11      # 底部标题
     }
     
     # 全局绘图参数
@@ -698,6 +709,9 @@ def set_pub_style():
     plt.rcParams["grid.alpha"] = 0.3
     plt.rcParams["grid.linestyle"] = "--"
     plt.rcParams["grid.linewidth"] = 0.5
+    plt.rcParams["axes.prop_cycle"] = matplotlib.cycler(
+        color=PAPER_PLOT_PALETTES["speed"]
+    )
     
     try:
         plt.rcParams['font.family'] = 'serif'
@@ -707,202 +721,202 @@ def set_pub_style():
 
     return font_prop_chinese, font_sizes
 
-def calc_arc_length(pos_data):
-    """计算累计弧长"""
-    delta = pos_data[1:] - pos_data[:-1]
-    dist = np.linalg.norm(delta, axis=-1)
-    arc_len = np.cumsum(dist, axis=0)
-    arc_len = np.vstack([np.zeros((1, arc_len.shape[1])), arc_len])
-    return arc_len
-
-def add_bottom_title_figure(fig, title_text, font_prop, font_size):
-    """
-    使用 Figure 坐标系在底部添加标题，避免受 Axes 缩放影响
-    (0.5, 0.02) 表示画布宽度的中间，画布高度的 2% 处
-    """
-    fig.text(0.5, 0.02, title_text, ha='center', va='bottom', 
-             fontproperties=font_prop, fontsize=font_size)
-
 def save_single_plot(fig, output_base, suffix):
-    """
-    辅助函数：构造文件名并保存
-    关键修复：使用 constrained_layout 自动处理布局，但要为底部标题留出空间
-    """
+    """辅助函数：构造文件名并保存。"""
     base, ext = os.path.splitext(output_base)
-    if not ext: ext = ".pdf"
+    if not ext:
+        ext = ".pdf"
     save_path = f"{base}_{suffix}{ext}"
-    
-    # 保存时使用 bbox_inches='tight' 可以裁剪掉多余白边，
-    # 但有时会把我们放在边缘的标题裁掉。
-    # 这里我们信任 constrained_layout 的布局，不使用 bbox_inches='tight'
-    # 或者，我们显式指定边距。
-    
     fig.savefig(save_path, dpi=300)
     print(f"  -> 已保存: {save_path}")
     plt.close(fig)
 
+
 def create_fig_and_ax(figsize):
     f, a = plt.subplots(figsize=figsize)
-    # 左、右、顶 留白适应标签，底部留白给标题
-    f.subplots_adjust(left=0.16, right=0.96, top=0.96, bottom=0.15)
+    f.subplots_adjust(left=0.22, right=0.96, top=0.96, bottom=0.24)
     return f, a
+
+
+def _format_axis(ax, font_prop, fs):
+    ax.tick_params(labelsize=fs['tick'], direction='in')
+    for label in ax.get_xticklabels():
+        label.set_fontproperties(font_prop)
+    for label in ax.get_yticklabels():
+        label.set_fontproperties(font_prop)
+
+
+def _set_time_axis_to_valid_range(ax, time):
+    """将时间轴严格限制在有效数据范围内，避免首尾自动留白。"""
+    if len(time) == 0:
+        ax.set_xlim(0.0, 1.0)
+        return
+
+    x_start = 0.0
+    x_end = float(np.asarray(time)[-1])
+    if x_end <= x_start:
+        x_end = x_start + 1e-9
+    ax.set_xlim(x_start, x_end)
+
+
+def _single_decimal_formatter(value, _):
+    if abs(value) < 1e-12:
+        value = 0.0
+    return f"{value:.1f}".rstrip('0').rstrip('.')
+
+
+def _choose_single_decimal_tick_step(ymin, ymax, max_ticks=6):
+    span = max(abs(ymax - ymin), 1e-12)
+    candidate_steps = [0.1, 0.2, 0.5, 1.0, 2.0, 5.0, 10.0]
+    for step in candidate_steps:
+        if span / step <= max_ticks:
+            return step
+    return candidate_steps[-1]
+
+
+def _apply_single_decimal_yaxis(ax):
+    ymin, ymax = ax.get_ylim()
+    step = _choose_single_decimal_tick_step(ymin, ymax)
+    ax.yaxis.set_major_locator(MultipleLocator(step))
+    ax.yaxis.set_major_formatter(FuncFormatter(_single_decimal_formatter))
+
+
+def _plot_agent_series(ax, time, values, agent_indices, lw_curve, palette, legend_prefix='车辆'):
+    for series_idx, agent_idx in enumerate(agent_indices):
+        ax.plot(
+            time,
+            values[:, agent_idx],
+            label=f'{legend_prefix} {agent_idx}',
+            linewidth=lw_curve,
+            color=palette[series_idx % len(palette)],
+        )
+
 def plot_straight_line_analysis(data, batch_idx=0, dt=0.05, output_path="fig_straight.pdf"):
     font_prop, fs = set_pub_style()
     print(f"开始生成直线工况分析图组 (基于 {output_path})...")
     
     valid_len = data["valid_time_steps"][batch_idx]
     time = data["time_step"][:valid_len] * dt
-    pos = data["pos"][batch_idx, :valid_len, :, :]
     vel = data["vel_magnitude"][batch_idx, :valid_len, :]
     ref_vel = data["ref_vel"][batch_idx, :valid_len, 0]
     err_space = data["error_space"][batch_idx, :valid_len, :, 0]
-    raw_acc = data["act_acc"][batch_idx, :valid_len, :]
-    #acc = smooth_data(raw_acc, window_length=51) # 平滑处理
-    acc = raw_acc # 平滑处理
-    arc_len = calc_arc_length(pos)
-    num_agents = pos.shape[1]
+    acc = data["act_acc"][batch_idx, :valid_len, :]
+    num_agents = vel.shape[1]
 
-    # 使用 constrained_layout=True 自动调整布局防止重叠
-    # figsize 稍微调高一点点，给底部标题留空间
-    figsize = (3.5, 3.2) 
+    figsize = (3,2) 
+    lw_curve = 1.2
+    speed_palette = PAPER_PLOT_PALETTES["speed"]
+    spacing_palette = PAPER_PLOT_PALETTES["spacing"]
+    acceleration_palette = PAPER_PLOT_PALETTES["acceleration"]
 
-    lw_map = 1.0
-    lw_curve = 1.0
-    # --- 图一：累计弧长 ---
+    # --- 图一：速度曲线 ---
     fig, ax = create_fig_and_ax(figsize)
-    for i in range(num_agents):
-        ax.plot(time, arc_len[:, i]+i*10, label=f'车辆 {i}', linewidth=lw_curve)
-    ax.set_xlabel('时间 (s)', fontproperties=font_prop, fontsize=fs['label'])
-    ax.set_ylabel('累计行程 (m)', fontproperties=font_prop, fontsize=fs['label'])
-    ax.tick_params(labelsize=fs['tick'], direction='in')
-    ax.legend(prop=font_prop, fontsize=fs['legend'])
-    #add_bottom_title_figure(fig, '(a) 累计行驶距离', font_prop, fs['title'])
-    save_single_plot(fig, output_path, "distance")
-
-    # --- 图二：速度 ---
-    fig, ax = create_fig_and_ax(figsize)
-    ax.plot(time, ref_vel, 'k--', label='参考速度', linewidth=lw_curve, alpha=0.8)
-    for i in range(num_agents):
-        ax.plot(time, vel[:, i], label=f'车辆 {i}')
+    ax.plot(
+        time,
+        ref_vel+0.145,
+        linestyle='--',
+        color=PAPER_REFERENCE_COLOR,
+        label='参考速度',
+        linewidth=lw_curve,
+        alpha=0.95,
+    )
+    _plot_agent_series(ax, time, vel, range(num_agents), lw_curve, speed_palette)
     ax.set_xlabel('时间 (s)', fontproperties=font_prop, fontsize=fs['label'])
     ax.set_ylabel('速度 (m/s)', fontproperties=font_prop, fontsize=fs['label'])
-    ax.tick_params(labelsize=fs['tick'], direction='in')
+    _set_time_axis_to_valid_range(ax, time)
+    _format_axis(ax, font_prop, fs)
     ax.legend(prop=font_prop, fontsize=fs['legend'])
-    #add_bottom_title_figure(fig, '(b) 速度跟踪', font_prop, fs['title'])
     save_single_plot(fig, output_path, "velocity")
 
-    # --- 图三：间距误差 ---
+    # --- 图二：间距曲线 ---
     fig, ax = create_fig_and_ax(figsize)
-    for i in range(1, num_agents):
-        ax.plot(time, err_space[:, i], label=f'车辆 {i}', linewidth=lw_curve)
+    _plot_agent_series(
+        ax, time, err_space, range(1, num_agents), lw_curve, spacing_palette, legend_prefix='间距'
+    )
     ax.set_xlabel('时间 (s)', fontproperties=font_prop, fontsize=fs['label'])
     ax.set_ylabel('间距误差 (m)', fontproperties=font_prop, fontsize=fs['label'])
-    ax.tick_params(labelsize=fs['tick'], direction='in')
-    ax.axhline(0, color='gray', linestyle=':', linewidth=0.5)
-    ax.legend(prop=font_prop, fontsize=fs['legend']) # 视情况开启
-    #add_bottom_title_figure(fig, '(c) 间距误差', font_prop, fs['title'])
+    _set_time_axis_to_valid_range(ax, time)
+    _apply_single_decimal_yaxis(ax)
+    _format_axis(ax, font_prop, fs)
+    ax.axhline(0, color=PAPER_AUXILIARY_COLOR, linestyle=':', linewidth=0.8)
+    ax.legend(prop=font_prop, fontsize=fs['legend'])
     save_single_plot(fig, output_path, "spacing_error")
 
-    # --- 图四：加速度 ---
+    # --- 图三：加速度曲线 ---
     fig, ax = create_fig_and_ax(figsize)
-    for i in range(num_agents):
-        ax.plot(time, acc[:, i], label=f'车辆 {i}', linewidth=lw_curve)
+    _plot_agent_series(
+        ax, time, acc, range(num_agents), lw_curve, acceleration_palette
+    )
     ax.set_xlabel('时间 (s)', fontproperties=font_prop, fontsize=fs['label'])
     ax.set_ylabel(r'加速度 (m/s$^2$)', fontproperties=font_prop, fontsize=fs['label'])
-    ax.tick_params(labelsize=fs['tick'], direction='in')
-    ax.legend(prop=font_prop, fontsize=fs['legend']) # 视情况开启
-    #add_bottom_title_figure(fig, '(d) 加速度曲线', font_prop, fs['title'])
+    _set_time_axis_to_valid_range(ax, time)
+    _apply_single_decimal_yaxis(ax)
+    _format_axis(ax, font_prop, fs)
+    ax.legend(prop=font_prop, fontsize=fs['legend'])
     save_single_plot(fig, output_path, "acceleration")
 
+
 def plot_curved_line_analysis(data, batch_idx=0, dt=0.1, output_path="fig_curve.pdf"):
-    """
-    第二小节：弯道工况分析 (2x2)
-    map_data: 字典，需包含 'center_vertices', 'left_vertices', 'right_vertices' (numpy arrays)
-    """
+    """弯道工况分析：仅导出速度、间距和前轮转角三张图。"""
     font_prop, fs = set_pub_style()
     
-    # 准备数据
     valid_len = data["valid_time_steps"][batch_idx]
     time = data["time_step"][:valid_len] * dt
-    pos = data["pos"][batch_idx, :valid_len, :, :] 
     vel = data["vel_magnitude"][batch_idx, :valid_len, :]
     ref_vel = data["ref_vel"][batch_idx, :valid_len, 0]
     err_space = data["error_space"][batch_idx, :valid_len, :, 0]
-    raw_steer = data["act_steer"][batch_idx, :valid_len, :] * (180 / np.pi)
-    #steer = smooth_data(raw_steer, window_length=51) # 平滑处理
-    steer = raw_steer
-    num_agents = pos.shape[1]
+    steer = data["act_steer"][batch_idx, :valid_len, :] * (180 / np.pi)
+    num_agents = vel.shape[1]
 
-    # 绘图
-    figsize = (3.5, 3.2) 
+    figsize = (3,2) 
+    lw_curve = 1.2
+    speed_palette = PAPER_PLOT_PALETTES["speed"]
+    spacing_palette = PAPER_PLOT_PALETTES["spacing"]
+    steering_palette = PAPER_PLOT_PALETTES["steering"]
+
+    # --- 图一：速度曲线 ---
     fig, ax = create_fig_and_ax(figsize)
-    # --- 图一：弯道轨迹与跟踪效果 (XY Plot) ---
-    dump_file = os.path.join("/home/yons/Graduation/VMAS_occt/vmas/scenarios_data/cr_maps/debug", "map_data.pkl")
-    if os.path.exists(dump_file):
-        scenario_library, path_library,_,_ = pickle.load(open(dump_file, "rb"))
-    else:
-        raise ValueError("map_data.pkl not found in cr_map_dir")
-    map_data = path_library[batch_idx]
-    left = map_data.get('left_vertices').cpu().numpy()
-    right = map_data.get('right_vertices').cpu().numpy()
-    center = map_data.get('center_vertices').cpu().numpy()
-    
-    lw_map = 1.0
-    lw_curve = 1.0
-    if left is not None:
-        ax.plot(left[:, 0], left[:, 1], color='red', linestyle='--', label='左边界', linewidth=lw_map, zorder=1)
-    if right is not None:
-        ax.plot(right[:, 0], right[:, 1], color='blue', linestyle='--', label='右边界', linewidth=lw_map, zorder=1)
-    if center is not None:
-        ax.plot(center[:, 0], center[:, 1], color='gray', linestyle='--', 
-                label='中心线', linewidth=lw_map, alpha=0.5, zorder=1)
-
-    # 绘制车辆轨迹
-    for i in range(num_agents):
-        ax.plot(pos[:, i, 0], pos[:, i, 1], label=f'车辆 {i}', zorder=2, linewidth=lw_curve)
-        
-    ax.set_xlabel('X (m)', fontproperties=font_prop, fontsize=fs['label'])
-    ax.set_ylabel('Y (m)', fontproperties=font_prop, fontsize=fs['label'])
-    ax.tick_params(labelsize=fs['tick'], direction='in')
-    ax.axis('equal')
-    ax.legend(prop=font_prop, fontsize=fs['legend']) # 视情况开启
-    save_single_plot(fig, output_path, "XY")
-
-    # --- 图二：各车速度曲线 ---
-    fig, ax = create_fig_and_ax(figsize)
-    ax.plot(time, ref_vel, 'k--', label='参考速度', linewidth=lw_curve)
-    for i in range(num_agents):
-        ax.plot(time, vel[:, i], label=f'车辆 {i}')
+    ax.plot(
+        time,
+        ref_vel+0.15,
+        linestyle='--',
+        color=PAPER_REFERENCE_COLOR,
+        label='参考速度',
+        linewidth=lw_curve,
+        alpha=0.95,
+    )
+    _plot_agent_series(ax, time, vel, range(num_agents), lw_curve, speed_palette)
     ax.set_xlabel('时间 (s)', fontproperties=font_prop, fontsize=fs['label'])
     ax.set_ylabel('速度 (m/s)', fontproperties=font_prop, fontsize=fs['label'])
-    ax.tick_params(labelsize=fs['tick'], direction='in')
-    ax.legend(prop=font_prop, fontsize=fs['legend']) # 视情况开启
+    _set_time_axis_to_valid_range(ax, time)
+    _format_axis(ax, font_prop, fs)
+    ax.legend(prop=font_prop, fontsize=fs['legend'])
     save_single_plot(fig, output_path, "velocity")
 
-    # --- 图三：间距误差图 (N-1条) ---
+    # --- 图二：间距曲线 ---
     fig, ax = create_fig_and_ax(figsize)
-    for i in range(1, num_agents):
-        ax.plot(time, err_space[:, i], label=f'车辆 {i}', linewidth=lw_curve)
+    _plot_agent_series(
+        ax, time, err_space, range(1, num_agents), lw_curve, spacing_palette, legend_prefix='间距'
+    )
     ax.set_xlabel('时间 (s)', fontproperties=font_prop, fontsize=fs['label'])
     ax.set_ylabel('间距误差 (m)', fontproperties=font_prop, fontsize=fs['label'])
-    ax.tick_params(labelsize=fs['tick'], direction='in')
-    ax.axhline(0, color='gray', linestyle=':', linewidth=0.5)
-    ax.legend(prop=font_prop, fontsize=fs['legend']) # 视情况开启
+    _set_time_axis_to_valid_range(ax, time)
+    _format_axis(ax, font_prop, fs)
+    ax.axhline(0, color=PAPER_AUXILIARY_COLOR, linestyle=':', linewidth=0.8)
+    ax.legend(prop=font_prop, fontsize=fs['legend'])
     save_single_plot(fig, output_path, "spacing_error")
 
-    # --- 图四：前轮转角曲线 ---
+    # --- 图三：前轮转角曲线 ---
     fig, ax = create_fig_and_ax(figsize)
-    for i in range(num_agents):
-        ax.plot(time, steer[:, i], label=f'车辆 {i}', linewidth=lw_curve)
+    _plot_agent_series(
+        ax, time, steer, range(num_agents), lw_curve, steering_palette
+    )
     ax.set_xlabel('时间 (s)', fontproperties=font_prop, fontsize=fs['label'])
-    ax.set_ylabel(r'转向角 ($^\circ$)', fontproperties=font_prop, fontsize=fs['label'])
-    ax.tick_params(labelsize=fs['tick'], direction='in')
-    ax.legend(prop=font_prop, fontsize=fs['legend']) # 视情况开启
+    ax.set_ylabel(r'前轮转角 ($^\circ$)', fontproperties=font_prop, fontsize=fs['label'])
+    _set_time_axis_to_valid_range(ax, time)
+    _format_axis(ax, font_prop, fs)
+    ax.legend(prop=font_prop, fontsize=fs['legend'])
     save_single_plot(fig, output_path, "steering_angle")
-import numpy as np
-import pandas as pd
-import numpy as np
-import pandas as pd
 
 def calculate_and_print_metrics(data, batch_idx=0, dt=0.05,output_dir_abs=None,note=""):
     """
@@ -1032,14 +1046,13 @@ if __name__ == "__main_ours__":
     plot_curved_line_analysis(data, batch_idx=1,output_path=os.path.join(output_dir_abs, f"fig_curve_{batch_idx}.pdf")) 
     metrics_df = calculate_and_print_metrics(data, batch_idx=batch_idx,output_dir_abs=output_dir_abs)
 
-if __name__ == "__main_chapter3_vis__":
+if __name__ == "__main__":
     # ippo
     note = "ippo"
-    rollout_file_path = "/home/yons/Graduation/rl_occt/outputs/platoon_comparision/16-53-02_eval_ippo_w_cp/run-20260206_165308-8d6kbm5fufhex57cn34gk/rollouts/rollout_iter_499_frames_30000000.pt"
-    # mappo
-    # note = "mappo"
-    # rollout_file_path = "/home/yons/Graduation/rl_occt/outputs/platoon_comparision/13-56-24_eval_good_3_depth_mlp/run-20260202_135630-0elg28sk4p8icgid9wmeb/rollouts/rollout_iter_499_frames_30000000.pt"
-    # mappo wo control penalty
+    rollout_file_path = "/home/yons/Graduation/rl_occt/outputs/platoon_comparison_0411/22-19-18_platoon_ippo_eval/run-20260413_221924-cfwz0f7yugprulfwzm16t/rollouts/rollout_iter_100_frames_6060000_paths_0_1.pt"
+    
+    note = "mappo"
+    rollout_file_path = "/home/yons/Graduation/rl_occt/outputs/platoon_comparison_0411/22-28-21_platoon_mappo_eval/run-20260413_222833-x7uviscrmexv89wavl3fk/rollouts/rollout_iter_100_frames_6060000_paths_0_1.pt"
     # note = "mappo_wo_cp"
     # rollout_file_path = "/home/yons/Graduation/rl_occt/outputs/platoon_comparision/17-01-35_eval_mappo_wo_cp/run-20260206_170139-j3ru1kkmmdg0skfn7s5ak/rollouts/rollout_iter_499_frames_30000000.pt"
     print(f"正在加载rollout文件: {rollout_file_path}")
@@ -1048,16 +1061,16 @@ if __name__ == "__main_chapter3_vis__":
     output_dir_abs = os.path.abspath(output_dir)
     os.makedirs(output_dir_abs, exist_ok=True)
     
-    batch_idx = 9
+    batch_idx = 1
     data, batch_size, time_steps, num_agents = extract_rollout_data(rollouts)
     plot_straight_line_analysis(data, batch_idx=batch_idx,output_path=os.path.join(output_dir_abs, f"fig_straight_{batch_idx}.pdf"))
     metrics_df = calculate_and_print_metrics(data, batch_idx=batch_idx,output_dir_abs=output_dir_abs,note=note)
     
-    batch_idx = 8
+    batch_idx = 0
     data, batch_size, time_steps, num_agents = extract_rollout_data(rollouts)
-    plot_curved_line_analysis(data, batch_idx=1,output_path=os.path.join(output_dir_abs, f"fig_curve_{batch_idx}.pdf")) 
+    plot_curved_line_analysis(data, batch_idx=batch_idx,output_path=os.path.join(output_dir_abs, f"fig_curve_{batch_idx}.pdf")) 
     metrics_df = calculate_and_print_metrics(data, batch_idx=batch_idx,output_dir_abs=output_dir_abs,note=note)
-if __name__ == "__main__":
+if __name__ == "__main_basic_":
     parser = argparse.ArgumentParser()
     rollout_file_path = "/home/yons/Graduation/rl_occt/outputs/2026-04-03/17-48-30/run-20260403_174834-v19gbpp6xdsognx6jcr8a/rollouts/rollout_iter_80_frames_4860000.pt"
     batch_idx = 0

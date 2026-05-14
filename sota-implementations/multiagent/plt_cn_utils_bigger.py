@@ -15,10 +15,10 @@ def get_chinese_font(size=None):
 # 定义中文字体属性（宋体，适配小尺寸论文插图）
 font_prop_chinese = get_chinese_font(size=7)  # 小尺寸适配
 # 字体大小统一配置（适配小尺寸论文插图）
-font_size_label = 7     # 坐标轴标签字体大小（适配3x2画布）
-font_size_tick = 6      # 刻度字体大小（数字用新罗马）
-font_size_legend = 6    # 图例字体大小
-font_size_title = 8     # 标题字体大小
+font_size_label = 7+4     # 坐标轴标签字体大小（适配3x2画布）
+font_size_tick = 6+4      # 刻度字体大小（数字用新罗马）
+font_size_legend = 6+4    # 图例字体大小
+font_size_title = 8+4     # 标题字体大小
 
 # 全局绘图参数（极致适配小尺寸论文插图+中文显示）
 plt.rcParams["axes.unicode_minus"] = False  # 解决负号显示异常问题

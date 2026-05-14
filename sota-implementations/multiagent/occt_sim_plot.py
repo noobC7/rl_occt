@@ -32,6 +32,27 @@ pd.set_option('display.unicode.ambiguous_as_wide', True)
 pd.set_option('display.unicode.east_asian_width', True)
 
 
+def _set_xaxis_to_valid_range(ax, *x_series_list):
+    """将 x 轴限制在有效数据范围内，避免 matplotlib 自动留白。"""
+    x_end = None
+    for x_values in x_series_list:
+        x_array = np.asarray(x_values)
+        if x_array.size == 0:
+            continue
+        candidate_end = float(x_array[-1])
+        if x_end is None or candidate_end > x_end:
+            x_end = candidate_end
+
+    if x_end is None:
+        ax.set_xlim(0.0, 1.0)
+        return
+
+    x_start = 0.0
+    if x_end <= x_start:
+        x_end = x_start + 1e-9
+    ax.set_xlim(x_start, x_end)
+
+
 def extract_rollout_data_simple(file_path, batch_idx=0):
     """从rollout文件中提取所需的速度和位置数据"""
     if not os.path.exists(file_path):
@@ -208,48 +229,64 @@ def plot_comparison():
     colors = ["red", "blue", "green", "orange"]
     
     # --- 图 1：第一辆车速度曲线 ---
-    plt.figure(figsize=figsize)
-    plt.plot(time, ref_vel, 'k--', label='参考速度', alpha=0.7)
+    fig, ax = plt.subplots(figsize=figsize)
+    ax.plot(time, ref_vel, 'k--', label='参考速度', alpha=0.7)
+    x_series_list = [time]
     for i, m in enumerate(methods):
         if m in all_data:
             v = all_data[m]["vel_magnitude"][:, 0]
-            plt.plot(time[:len(v)], v, color=colors[i], label=m)
-    plt.xlabel('时间 (s)', fontproperties=font_prop_chinese)
-    plt.ylabel('首车速度 (m/s)', fontproperties=font_prop_chinese)
-    plt.legend(prop=font_prop_chinese, frameon=False, loc='upper right')
-    plt.tight_layout()
-    plt.savefig(dir_path+f'batch_idx_{batch_idx}_front_speed.pdf')
+            method_time = np.arange(len(v)) * dt
+            ax.plot(method_time, v, color=colors[i], label=m)
+            x_series_list.append(method_time)
+    ax.set_xlabel('时间 (s)', fontproperties=font_prop_chinese)
+    ax.set_ylabel('首车速度 (m/s)', fontproperties=font_prop_chinese)
+    ax.legend(prop=font_prop_chinese, frameon=False, loc='upper right')
+    _set_xaxis_to_valid_range(ax, *x_series_list)
+    fig.tight_layout()
+    fig.savefig(dir_path+f'batch_idx_{batch_idx}_front_speed.pdf')
+    plt.close(fig)
     
     # --- 图 2：最后一辆车速度曲线 ---
-    plt.figure(figsize=figsize)
-    plt.plot(time, ref_vel, 'k--', label='参考速度', alpha=0.7)
+    fig, ax = plt.subplots(figsize=figsize)
+    ax.plot(time, ref_vel, 'k--', label='参考速度', alpha=0.7)
+    x_series_list = [time]
     for i, m in enumerate(methods):
         if m in all_data:
             v = all_data[m]["vel_magnitude"][:, -1]
-            plt.plot(time[:len(v)], v, color=colors[i], label=m)
-    plt.xlabel('时间 (s)', fontproperties=font_prop_chinese)
-    plt.ylabel('尾车速度 (m/s)', fontproperties=font_prop_chinese)
-    plt.legend(prop=font_prop_chinese, frameon=False)
-    plt.tight_layout()
-    plt.savefig(dir_path+f'batch_idx_{batch_idx}_rear_speed.pdf')
+            method_time = np.arange(len(v)) * dt
+            ax.plot(method_time, v, color=colors[i], label=m)
+            x_series_list.append(method_time)
+    ax.set_xlabel('时间 (s)', fontproperties=font_prop_chinese)
+    ax.set_ylabel('尾车速度 (m/s)', fontproperties=font_prop_chinese)
+    ax.legend(prop=font_prop_chinese, frameon=False)
+    _set_xaxis_to_valid_range(ax, *x_series_list)
+    fig.tight_layout()
+    fig.savefig(dir_path+f'batch_idx_{batch_idx}_rear_speed.pdf')
+    plt.close(fig)
 
     # --- 图 3：超大件中心速度曲线 ---
-    plt.figure(figsize=figsize)
+    fig, ax = plt.subplots(figsize=figsize)
+    x_series_list = []
     for i, m in enumerate(methods):
         if m in all_data:
             v_f = all_data[m]["vel_vec"][:, 0, :]
             v_r = all_data[m]["vel_vec"][:, -1, :]
             # 矢量均值的模
             v_cargo = np.linalg.norm((v_f + v_r) / 2.0, axis=1)
-            plt.plot(time[:len(v_cargo)], v_cargo, color=colors[i], label=m)
-    plt.xlabel('时间 (s)', fontproperties=font_prop_chinese)
-    plt.ylabel('大件速度 (m/s)', fontproperties=font_prop_chinese)
-    plt.legend(prop=font_prop_chinese, frameon=False)
-    plt.tight_layout()
-    plt.savefig(dir_path+f'batch_idx_{batch_idx}_cargo_center_speed.pdf')
+            method_time = np.arange(len(v_cargo)) * dt
+            ax.plot(method_time, v_cargo, color=colors[i], label=m)
+            x_series_list.append(method_time)
+    ax.set_xlabel('时间 (s)', fontproperties=font_prop_chinese)
+    ax.set_ylabel('大件速度 (m/s)', fontproperties=font_prop_chinese)
+    ax.legend(prop=font_prop_chinese, frameon=False)
+    _set_xaxis_to_valid_range(ax, *x_series_list)
+    fig.tight_layout()
+    fig.savefig(dir_path+f'batch_idx_{batch_idx}_cargo_center_speed.pdf')
+    plt.close(fig)
 
     # --- 图 4：超大件角速度曲线 ---
-    plt.figure(figsize=figsize)
+    fig, ax = plt.subplots(figsize=figsize)
+    x_series_list = []
     for i, m in enumerate(methods):
         if m in all_data:
             p_f = all_data[m]["pos"][:, 0, :]
@@ -260,12 +297,16 @@ def plot_comparison():
             ang_vel = np.diff(heading) / dt
             # 补齐一帧
             ang_vel = np.append(ang_vel, ang_vel[-1])
-            plt.plot(time[:len(ang_vel)], ang_vel, color=colors[i], label=m)
-    plt.xlabel('时间 (s)', fontproperties=font_prop_chinese)
-    plt.ylabel('大件角速度 (rad/s)', fontproperties=font_prop_chinese)
-    plt.legend(prop=font_prop_chinese, frameon=False)
-    plt.tight_layout()
-    plt.savefig(dir_path+f'batch_idx_{batch_idx}_cargo_angular_velocity.pdf')
+            method_time = np.arange(len(ang_vel)) * dt
+            ax.plot(method_time, ang_vel, color=colors[i], label=m)
+            x_series_list.append(method_time)
+    ax.set_xlabel('时间 (s)', fontproperties=font_prop_chinese)
+    ax.set_ylabel('大件角速度 (rad/s)', fontproperties=font_prop_chinese)
+    ax.legend(prop=font_prop_chinese, frameon=False)
+    _set_xaxis_to_valid_range(ax, *x_series_list)
+    fig.tight_layout()
+    fig.savefig(dir_path+f'batch_idx_{batch_idx}_cargo_angular_velocity.pdf')
+    plt.close(fig)
 
     print("分析图表已成功保存为 PDF 文件。")
 

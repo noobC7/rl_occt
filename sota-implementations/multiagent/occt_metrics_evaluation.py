@@ -12,7 +12,7 @@ try:
 except ImportError:
     yaml = None
 
-from plt_cn_utils import *
+from plt_cn_utils_bigger import *
 
 
 DEFAULT_DT = 0.05
@@ -155,6 +155,13 @@ def _safe_std(values: List[float]) -> float:
     if not values:
         return float("nan")
     return float(torch.tensor(values, dtype=torch.float32).std(unbiased=False).item())
+
+
+def _extend_float_values(values: List[float], tensor: torch.Tensor) -> None:
+    tensor = torch.as_tensor(tensor, dtype=torch.float32)
+    if tensor.numel() == 0:
+        return
+    values.extend(tensor.reshape(-1).detach().cpu().tolist())
 
 
 def _safe_min(values: List[float]) -> float:
@@ -864,11 +871,14 @@ def compute_validation_metrics_from_object(
         platoon_mask = ~hinge_status
         if platoon_mask.any():
             abs_error = error_space.abs()
-            platoon_abs_all.append(float(abs_error[platoon_mask].mean().item()))
-            platoon_front.append(float(abs_error[..., 0][platoon_mask].mean().item()))
-            platoon_back.append(float(abs_error[..., 1][platoon_mask].mean().item()))
-            platoon_lateral_tracking_errors.append(
-                float(distance_ref[platoon_mask].mean().item())
+            # Aggregate all valid frame samples so the reported mean/std reflect the
+            # full road rollout distribution instead of episode-level averages.
+            _extend_float_values(platoon_abs_all, abs_error[platoon_mask])
+            _extend_float_values(platoon_front, abs_error[..., 0][platoon_mask])
+            _extend_float_values(platoon_back, abs_error[..., 1][platoon_mask])
+            _extend_float_values(
+                platoon_lateral_tracking_errors,
+                distance_ref[platoon_mask],
             )
 
         episode_ttc_candidates = []
@@ -1675,8 +1685,7 @@ def _style_cn_axes(
     if show_legend:
         ax.legend(
             loc="best",
-            fontsize=font_size_legend,
-            prop=font_prop_chinese,
+            prop=get_chinese_font(font_size_legend),
             handlelength=1.8,
             borderpad=0.2,
             labelspacing=0.2,
@@ -1958,8 +1967,7 @@ def _plot_plot_method_metric_pdf(
             handles,
             labels,
             loc="best",
-            fontsize=font_size_legend,
-            prop=font_prop_chinese,
+            prop=get_chinese_font(font_size_legend),
             handlelength=1.8,
             borderpad=0.2,
             labelspacing=0.2,
@@ -2610,8 +2618,7 @@ def _plot_grouped_scaled_bar_metrics_pdf(
         labels=[_get_method_display_name(method) for method in methods],
         loc="upper center",
         ncol=len(methods),
-        fontsize=font_size_legend,
-        prop=font_prop_chinese,
+        prop=get_chinese_font(font_size_legend),
         frameon=False,
         borderpad=0.2,
         labelspacing=0.2,
@@ -2855,7 +2862,13 @@ def plot_method_transition_comparison(
     ax.set_xlabel("Time (s)")
     ax.set_ylabel("hinge_dis (m)")
     ax.grid(True, alpha=0.3)
-    ax.legend(line_handles, line_labels, loc="upper right", frameon=False)
+    ax.legend(
+        line_handles,
+        line_labels,
+        loc="upper right",
+        frameon=False,
+        prop=get_chinese_font(font_size_legend),
+    )
     fig.tight_layout()
     hinge_dis_path = plot_dir / f"road{road_id}_agent{agent_id}_hinge_dis_comparison.png"
     fig.savefig(hinge_dis_path, dpi=200, bbox_inches="tight")
@@ -2892,7 +2905,13 @@ def plot_method_transition_comparison(
     ax.set_xlabel("Time (s)")
     ax.set_ylabel("Steering command")
     ax.grid(True, alpha=0.3)
-    ax.legend(line_handles, line_labels, loc="upper right", frameon=False)
+    ax.legend(
+        line_handles,
+        line_labels,
+        loc="upper right",
+        frameon=False,
+        prop=get_chinese_font(font_size_legend),
+    )
     fig.tight_layout()
     steering_path = plot_dir / f"road{road_id}_agent{agent_id}_steering_comparison.png"
     fig.savefig(steering_path, dpi=200, bbox_inches="tight")
